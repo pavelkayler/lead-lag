@@ -61,6 +61,7 @@ export class FeedManager {
     this._bnFilterLastLogTs = 0;
     this._bnFallbackAttempted = false;
     this._bnDegradeLastLogTs = 0;
+    this._lastBnRawSample = null;
 
     this.tickLogSampleMs = Number(process.env.FEED_TICK_LOG_SAMPLE_MS) || 1000;
     this.latWin = Math.max(100, Number(process.env.LATENCY_WINDOW) || 2000);
@@ -183,6 +184,9 @@ export class FeedManager {
     }
 
     this._syncSubscriptions();
+    if (!this.symbols.length) {
+      this._emitFeedLog("WARN", "bn_whitelist_empty", { message: "Binance whitelist is empty after setSymbols" });
+    }
     this.logger?.log("bn_ws_symbols", { mode: this._binanceWsMode, count: this.symbols.length, preview: this.symbols.slice(0, 10) });
     this.logger?.log("symbols", { symbols: this.symbols });
   }
@@ -417,7 +421,12 @@ export class FeedManager {
         this._bnMsgLastSecTs = this.lastBnWsMsgRecvTs;
       }
       let msg;
-      try { msg = JSON.parse(raw.toString("utf8")); } catch { this._bnFiltered.invalidPayload++; return; }
+      try { msg = JSON.parse(raw.toString("utf8")); } catch {
+        this._bnFiltered.invalidPayload++;
+        this._lastBnRawSample = raw?.toString?.("utf8")?.slice?.(0, 400) || null;
+        this._emitFeedLog("WARN", "bn_ws_invalid_payload", { sample: this._lastBnRawSample });
+        return;
+      }
       const payload = msg?.data && typeof msg.data === "object" ? msg.data : msg;
       const symbol = String(payload?.s || "").toUpperCase();
       if (!symbol) {
@@ -438,7 +447,8 @@ export class FeedManager {
       const ask = Number(payload?.a);
       if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
         this._bnFiltered.invalidNumbers++;
-        this.logger?.log("bn_ws_invalid_book", { symbol, sample: payload });
+        this._lastBnRawSample = payload;
+        this._emitFeedLog("WARN", "bn_ws_invalid_book", { symbol, sample: payload });
         return;
       }
       this._bnMappedSinceOpen += 1;
@@ -454,6 +464,7 @@ export class FeedManager {
       this.binanceReconnects++;
       if (this._bnReconnectTimer) return;
       const delay = Math.min(15000, this._bnReconnectDelayMs);
+      this._emitFeedLog("ERROR", "bn_ws_down", { why: String(why || ""), code: extra?.code, reason: extra?.reason, reconnectAttempt: this.binanceReconnects, reconnectInMs: delay, mode: this._binanceWsMode, url });
       this._bnReconnectDelayMs = Math.min(15000, this._bnReconnectDelayMs * 2);
       this._bnReconnectTimer = setTimeout(() => {
         this._bnReconnectTimer = null;
@@ -479,6 +490,14 @@ export class FeedManager {
     if (!force && (now - this._bnFilterLastLogTs) < 5000) return;
     this._bnFilterLastLogTs = now;
     this.logger?.log("bn_ws_filtered", { ...this._bnFiltered, whitelistCount: this.symbols.length });
+  }
+
+  _emitFeedLog(level, code, payload = {}) {
+    const rec = { level: String(level || "INFO").toUpperCase(), code: String(code || "feed_log"), ts: Date.now(), ...payload };
+    this.logger?.log("feed_log", rec);
+    if (rec.level === "ERROR") console.error("[feed]", rec.code, payload);
+    else if (rec.level === "WARN") console.warn("[feed]", rec.code, payload);
+    this.broadcast?.("log", rec);
   }
 
 
@@ -665,19 +684,19 @@ export class FeedManager {
       if (health.wsUp && health.mappedSymbolsCount === 0 && this.lastBnWsOpenTs && (now - this.lastBnWsOpenTs) > 12000) {
         if ((now - this._bnDegradeLastLogTs) > 5000) {
           this._bnDegradeLastLogTs = now;
-          this.logger?.log("bn_ws_degraded", { reason: "mappedSymbolsCount=0_after_open", health });
+          this._emitFeedLog("WARN", "bn_ws_degraded", { reason: "mappedSymbolsCount=0_after_open", health });
         }
         if (!this._bnFallbackAttempted && this._binanceWsMode === "bookTickerAll") {
           this._bnFallbackAttempted = true;
           this._binanceWsMode = "streamWhitelist";
-          this.logger?.log("bn_ws_fallback", { from: "!bookTicker", to: "streamWhitelist", symbolsCount: this.symbols.length });
+          this._emitFeedLog("WARN", "bn_ws_fallback", { from: "!bookTicker", to: "streamWhitelist", symbolsCount: this.symbols.length });
           this._cleanupBinanceWs();
           this._connectBinanceWs();
         }
       }
       if (health.lastMsgAgeMs != null && health.lastMsgAgeMs > 10000 && (now - this._bnDegradeLastLogTs) > 5000) {
         this._bnDegradeLastLogTs = now;
-        this.logger?.log("bn_ws_degraded", { reason: "lastMsgAgeMs_threshold", health });
+        this._emitFeedLog("WARN", "bn_ws_degraded", { reason: "lastMsgAgeMs_threshold", health });
       }
       this.broadcast("feedStatus", { ts: now, bybit: { wsUp: this.isWsUp(), lastMsgAgeMs: this.lastWsMsgRecvTs ? (now - this.lastWsMsgRecvTs) : null, reconnects: this.reconnects }, binance: health });
     }

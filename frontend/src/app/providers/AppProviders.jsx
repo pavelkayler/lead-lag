@@ -12,6 +12,7 @@ const ROUTE_TOPICS = {
   "/demo": ["tradeState", "price"],
   "/real": ["tradeState", "price"],
   "/presets": [],
+  "/range-metrics": ["rangeMetrics"],
 };
 
 function topicsForPath(pathname = "/") {
@@ -39,6 +40,7 @@ export function AppProviders({ children }) {
   const [presetStats, setPresetStats] = useState({});
   const [tradeState, setTradeState] = useState(null);
   const [tradingStatus, setTradingStatus] = useState({ trading: false, mode: "demo" });
+  const [rangeMetrics, setRangeMetrics] = useState({ status: null, candidates: [], logs: [], lastPlan: null, noTrade: [] });
   const [uiError, setUiError] = useState("");
   const [activePath, setActivePath] = useState(() => window.location.pathname || "/");
 
@@ -118,6 +120,17 @@ export function AppProviders({ children }) {
         }
         if (msg.payload?.presetStats) setPresetStats(msg.payload.presetStats);
       }
+      if (msg.topic === "rangeMetrics") {
+        const evt = msg.payload || {};
+        setRangeMetrics((prev) => {
+          if (evt.kind === "status") return { ...prev, status: evt.payload || null };
+          if (evt.kind === "candidates") return { ...prev, candidates: evt.payload || [] };
+          if (evt.kind === "plan") return { ...prev, lastPlan: evt.payload || null };
+          if (evt.kind === "noTrade") return { ...prev, noTrade: [evt.payload, ...(prev.noTrade || [])].slice(0, 200) };
+          if (evt.kind === "log" || evt.kind === "error") return { ...prev, logs: [{ kind: evt.kind, ...(evt.payload || {}), ts: evt.ts }, ...(prev.logs || [])].slice(0, 400) };
+          return prev;
+        });
+      }
       if (msg.topic === "tradeState") {
         const payload = msg.payload || {};
         const normalizeOrder = (o = {}) => ({ ...o, linkId: o.linkId || o.orderLinkId || o.order_link_id || o.order_linkId || null, orderStatus: o.orderStatus || o.order_status || o.status || null });
@@ -180,6 +193,11 @@ export function AppProviders({ children }) {
   const savePreset = (preset) => action("savePreset", () => sendCommand("savePreset", { preset })).then((r) => { setPresets(r.presets || []); return r; });
   const deletePreset = (name) => action("deletePreset", () => sendCommand("deletePreset", { name })).then((r) => { setPresets(r.presets || []); return r; });
 
+  const startRangeMetrics = (cfg) => action("startRangeMetrics", () => sendCommand("startRangeMetrics", cfg || {}));
+  const stopRangeMetrics = () => action("stopRangeMetrics", () => sendCommand("stopRangeMetrics", {}));
+  const setRangeMetricsConfig = (cfg) => action("setRangeMetricsConfig", () => sendCommand("setRangeMetricsConfig", cfg || {}));
+  const getRangeMetricsStatus = () => action("getRangeMetricsStatus", () => sendCommand("getRangeMetricsStatus", {}));
+  const getRangeMetricsCandidates = () => action("getRangeMetricsCandidates", () => sendCommand("getRangeMetricsCandidates", {}));
 
   useEffect(() => {
     const onNav = () => setActivePath(window.location.pathname || "/");
@@ -225,16 +243,22 @@ export function AppProviders({ children }) {
         if (["/hedge", "/demo", "/real"].includes(activePath)) {
           await getTradeState({ maxOrders: 100, maxExecutions: 100 });
         }
+        if (activePath === "/range-metrics") {
+          const st = await sendCommand("getRangeMetricsStatus", {});
+          const c = await sendCommand("getRangeMetricsCandidates", {});
+          setRangeMetrics((prev) => ({ ...prev, status: st, candidates: c.candidates || prev.candidates }));
+        }
       } catch {}
     }, 10000);
     return () => clearInterval(pollRef.current);
   }, [status, activePath]);
 
   const value = useMemo(() => ({
-    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, setUiError, activePath,
+    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, setUiError, activePath,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
     startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
-  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, activePath, connect, disconnect, sendCommand]);
+    startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates,
+  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, activePath, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

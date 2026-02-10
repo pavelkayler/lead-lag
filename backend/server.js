@@ -134,6 +134,7 @@ import { LeadLagPaperStrategy } from "./src/paper/paperStrategy.js";
 import { SymbolUniverse } from "./src/utils/symbolUniverse.js";
 import { PaperTestRunner } from "./src/paper/paperTestRunner.js";
 import { LeadLagLiveTrader } from "./src/trading/leadLagLiveTrader.js";
+import { RangeMetricsRunner } from "./src/rangeMetricsIntraday/rangeRunner.js";
 
 const PORT = process.env.PORT || 8080;
 const BYBIT_CFG = resolveBybitConfig();
@@ -373,7 +374,7 @@ function startMetricsTicker(ctx, feed, hub, leadLag, priv, trade, risk, paper, s
 }
 
 
-function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader }) {
+function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader, rangeRunner }) {
 
   // Step 14: order timeout cancels (best-effort)
   const _orderTimeouts = new Map(); // orderId -> timeoutId
@@ -994,6 +995,31 @@ async getPaperTestStatus() {
   return paperTest.getStatus();
 },
 
+async startRangeMetrics(payload = {}) {
+  Promise.resolve().then(async () => {
+    await rangeRunner.start(payload || {});
+  }).catch((e) => logger?.log("range_start_err", { error: e?.message || String(e) }));
+  return { ok: true, queued: true, state: rangeRunner.status().state };
+},
+
+async stopRangeMetrics() {
+  return { ok: true, status: rangeRunner.stop() };
+},
+
+async getRangeMetricsStatus() {
+  return rangeRunner.status();
+},
+
+async setRangeMetricsConfig(payload = {}) {
+  const config = rangeRunner.setConfig(payload || {});
+  hub.broadcast("rangeMetrics", { kind: "configUpdated", ts: Date.now(), payload: config });
+  return { ok: true, config };
+},
+
+async getRangeMetricsCandidates() {
+  return { candidates: rangeRunner.getCandidates() };
+},
+
 async listPresets() {
   return { presets: paperTest.listPresets(), presetStats: paperTest.presetStats || {} };
 },
@@ -1067,6 +1093,7 @@ const universe = new SymbolUniverse({ bybitRest: rest, logger });
 const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger, leadLag, rest });
   const instruments = { normalizeQty };
   const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, instruments, logger });
+  const rangeRunner = new RangeMetricsRunner({ feed, rest, hub, logger, risk });
 
   (async () => {
     try {
@@ -1084,7 +1111,7 @@ const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hu
   strat.start(); // timer
   // strat.enable(false) by default
 
-  const handlers = makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader });
+  const handlers = makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader, rangeRunner });
 
 
 // Step 15: keep TradeState in sync even when private WS lags (demo env)

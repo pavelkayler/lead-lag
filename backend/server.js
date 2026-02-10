@@ -82,6 +82,26 @@ function fmtStep(value, step, mode = "floor") {
   return d > 0 ? out.toFixed(d) : String(Math.trunc(out));
 }
 
+async function normalizeQty(symbol, rawQty) {
+  const raw = Number(rawQty);
+  if (!Number.isFinite(raw) || raw <= 0) return rawQty;
+  try {
+    const rules = await getInstrumentRules(symbol);
+    const minQty = Number(rules?.minQty);
+    const qtyStep = Number(rules?.qtyStep);
+    let qty = raw;
+    if (Number.isFinite(minQty) && minQty > 0) qty = Math.max(qty, minQty);
+    if (Number.isFinite(qtyStep) && qtyStep > 0) {
+      qty = roundToStep(qty, qtyStep, "floor");
+      if (Number.isFinite(minQty) && minQty > 0 && qty < minQty) qty = minQty;
+      return fmtStep(qty, qtyStep, "floor");
+    }
+    return String(qty);
+  } catch {
+    return String(raw);
+  }
+}
+
 /**
  * server.js (Step 9)
  * ------------------
@@ -846,7 +866,8 @@ const estNotional = qty * mid;
       if (Number(sl.value) <= Number(tp.value)) throw new Error("Stop Loss должен быть больше Take Profit");
       const mid = feed.getMid(symbol);
       if (!Number.isFinite(mid) || mid <= 0) throw new Error("Нет цены для символа");
-      const qty = Math.max(0.001, qtyUSDT / mid);
+      const rawQty = Math.max(0.001, qtyUSDT / mid);
+      const qty = await normalizeQty(symbol, rawQty);
       const longTrigger = mid * (1 + offsetPercent / 100);
       const shortTrigger = mid * (1 - offsetPercent / 100);
       const groupId = `HEDGE-${Date.now()}`;
@@ -881,7 +902,8 @@ async startPaperTest(payload) {
   const rotateEveryMinutes = Number(payload?.rotateEveryMinutes || 60);
   const symbolsCount = Number(payload?.symbolsCount || 30);
   const minMarketCapUsd = Number(payload?.minMarketCapUsd || 10_000_000);
-  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd });
+  const presets = Array.isArray(payload?.presets) ? payload.presets : null;
+  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets });
   // Also push immediate tradeState snapshot to UI
   hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   return res;
@@ -952,7 +974,21 @@ const risk = new RiskManager({ allowSymbols: DEFAULT_SYMBOLS, logger });
 
 const universe = new SymbolUniverse({ bybitRest: rest, logger });
 const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger });
-  const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, logger });
+  const instruments = { normalizeQty };
+  const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, instruments, logger });
+
+  (async () => {
+    try {
+      const top = await universe.getTopUSDTPerps({ count: 50, minMarketCapUsd: 10_000_000 });
+      if (Array.isArray(top) && top.length) {
+        feed.setSymbols(top);
+        risk.allowSymbols = [...top];
+        logger.log("default_symbols_bootstrap", { count: top.length, symbols: top });
+      }
+    } catch (e) {
+      logger.log("default_symbols_bootstrap_err", { error: String(e?.message || e) });
+    }
+  })();
 
   strat.start(); // timer
   // strat.enable(false) by default

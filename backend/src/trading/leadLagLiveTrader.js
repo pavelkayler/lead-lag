@@ -1,11 +1,12 @@
 import { PaperBroker } from "../paper/paperBroker.js";
 
 export class LeadLagLiveTrader {
-  constructor({ feed, leadLag, rest, risk, logger = null } = {}) {
+  constructor({ feed, leadLag, rest, risk, instruments = null, logger = null } = {}) {
     this.feed = feed;
     this.leadLag = leadLag;
     this.rest = rest;
     this.risk = risk;
+    this.instruments = instruments;
     this.logger = logger;
     this.running = false;
     this.mode = "demo";
@@ -66,12 +67,13 @@ export class LeadLagLiveTrader {
       const symbol = top.follower;
       const mid = this.feed.getMid(symbol);
       if (!Number.isFinite(mid) || mid <= 0) return;
-      const qty = Math.max(0.001, this.params.qtyUSDT / mid);
-      const tpPct = Math.max(0.1, this.params.tpSigma / 100);
-      const slPct = Math.max(0.1, this.params.slSigma / 100);
+      const rawQty = Math.max(0.001, this.params.qtyUSDT / mid);
+      const qty = this.instruments?.normalizeQty ? await this.instruments.normalizeQty(symbol, rawQty) : rawQty;
+      const tpPct = Math.max(0.1, this.params.tpSigma);
+      const slPct = Math.max(0.1, this.params.slSigma);
       const sign = side === "Buy" ? 1 : -1;
-      const takeProfit = String(mid * (1 + sign * (tpPct / 100)));
-      const stopLoss = String(mid * (1 - sign * (slPct / 100)));
+      const takeProfit = String(mid * (1 + sign * tpPct / 100));
+      const stopLoss = String(mid * (1 - sign * slPct / 100));
 
       await this.rest.post("/v5/order/create", {
         category: "linear",

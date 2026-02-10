@@ -25,6 +25,7 @@ export class LeadLagPaperStrategy {
     this.enableTrendFilter = true;
     this.trendBars = 5;
     this.trendMinZ = 0.5;
+    this.entryStrictness = 65;
 
     this._timer = null;
     this._lastLeaderBarT = null;
@@ -56,6 +57,7 @@ export class LeadLagPaperStrategy {
     if (p.enableTrendFilter != null) this.enableTrendFilter = !!p.enableTrendFilter;
     if (p.trendBars != null) this.trendBars = Math.max(2, Math.round(n(p.trendBars, this.trendBars)));
     if (p.trendMinZ != null) this.trendMinZ = Math.max(0, n(p.trendMinZ, this.trendMinZ));
+    if (p.entryStrictness != null) this.entryStrictness = Math.min(100, Math.max(0, n(p.entryStrictness, this.entryStrictness)));
     if (p.name != null) this.currentPresetName = String(p.name);
 
     this.logger?.log("paper_params", this.getParams());
@@ -80,8 +82,13 @@ export class LeadLagPaperStrategy {
       enableTrendFilter: this.enableTrendFilter,
       trendBars: this.trendBars,
       trendMinZ: this.trendMinZ,
+      entryStrictness: this.entryStrictness,
       currentPresetName: this.currentPresetName,
     };
+  }
+
+  _strictFactor() {
+    return Math.min(1.4, Math.max(0.5, Number(this.entryStrictness || 65) / 65));
   }
 
   start() {
@@ -208,9 +215,11 @@ export class LeadLagPaperStrategy {
       this._countReject("noCandidatePairs", "Сканирую пары…");
       return;
     }
-    if (top.corr == null || top.corr < this.minCorr) {
+    const strictFactor = this._strictFactor();
+    const effMinCorr = this.minCorr * strictFactor;
+    if (top.corr == null || top.corr < effMinCorr) {
       this._countReject("corrFail", "Жду корреляцию…");
-      this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: this.minCorr }, "skip:corr");
+      this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: effMinCorr, baseMinCorr: this.minCorr, entryStrictness: this.entryStrictness }, "skip:corr");
       return;
     }
 
@@ -233,7 +242,7 @@ export class LeadLagPaperStrategy {
     const leaderVol = PaperBroker.rollingStd(leaderR);
     if (!Number.isFinite(leaderVol) || leaderVol <= 0) return;
 
-    const thr = this.impulseZ * leaderVol;
+    const thr = this.impulseZ * strictFactor * leaderVol;
     if (!this._pendingSetup && Math.abs(lastR) < thr) {
       this._countReject("impulseFail", "Жду импульс…");
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
@@ -251,7 +260,7 @@ export class LeadLagPaperStrategy {
       const slR = this.slSigma * followerVol;
       const brokerState = this.broker.getState();
       const costsR = (2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0))) / 10_000;
-      const edgeGateR = costsR * this.edgeMult;
+      const edgeGateR = costsR * this.edgeMult * strictFactor;
       if (tpR2 < edgeGateR) {
         this._countReject("edgeGateFail", "Edge gate блокирует вход…");
         this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, tpR2, edgeGateR, costsR, edgeMult: this.edgeMult }, `gate:edge:${leader}:${follower}`);
@@ -290,7 +299,7 @@ export class LeadLagPaperStrategy {
     setup.lastFollowerBarT = followerLastBar.t;
 
     const followerLastR = Number(followerLastBar.r);
-    const followerConfirmAbsMin = this.minFollowerConfirmZ * setup.followerVol;
+    const followerConfirmAbsMin = this.minFollowerConfirmZ * strictFactor * setup.followerVol;
     const followerConfirmed = Number.isFinite(followerLastR)
       && this._isSideAligned(setup.side, followerLastR)
       && Math.abs(followerLastR) >= followerConfirmAbsMin;

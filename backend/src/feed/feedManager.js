@@ -40,6 +40,9 @@ export class FeedManager {
     this._reconnectDelayMs = 500;
     this._bnReconnectDelayMs = 500;
     this._subscribedTopics = new Set();
+    this.tickersSnapshot = new Map(); // symbol -> ticker fields
+    this.trades = new Map(); // symbol -> [{ts,side,size,price}]
+    this.liquidations = new Map(); // symbol -> [{ts, side, size, price}]
 
     this.reconnects = 0;
     this.binanceReconnects = 0;
@@ -298,7 +301,21 @@ export class FeedManager {
       }
 
       const topic = msg?.topic;
-      if (typeof topic !== "string" || !topic.startsWith("tickers.")) return;
+      if (typeof topic !== "string") return;
+
+      if (topic.startsWith("publicTrade.")) {
+        const data = Array.isArray(msg?.data) ? msg.data : (msg?.data ? [msg.data] : []);
+        for (const d of data) this._applyPublicTrade(topic, d);
+        return;
+      }
+
+      if (topic.startsWith("allLiquidation.")) {
+        const data = Array.isArray(msg?.data) ? msg.data : (msg?.data ? [msg.data] : []);
+        for (const d of data) this._applyLiquidation(topic, d);
+        return;
+      }
+
+      if (!topic.startsWith("tickers.")) return;
 
       const exchTs = Number(msg.ts ?? NaN);
       const data = msg.data;
@@ -421,6 +438,23 @@ export class FeedManager {
     st.lastTickRecvTs = recvTs;
     st.lastTickExchTs = Number.isFinite(exchTs) ? exchTs : null;
 
+    this.tickersSnapshot.set(symbol, {
+      ts: recvTs,
+      symbol,
+      source,
+      lastPrice: Number.isFinite(last) ? last : null,
+      markPrice: Number.isFinite(mark) ? mark : null,
+      indexPrice: Number.isFinite(index) ? index : null,
+      openInterest: Number.isFinite(Number(d?.openInterest)) ? Number(d.openInterest) : null,
+      fundingRate: Number.isFinite(Number(d?.fundingRate)) ? Number(d.fundingRate) : null,
+      nextFundingTime: Number.isFinite(Number(d?.nextFundingTime)) ? Number(d.nextFundingTime) : null,
+      turnover24h: Number.isFinite(Number(d?.turnover24h)) ? Number(d.turnover24h) : null,
+      volume24h: Number.isFinite(Number(d?.volume24h)) ? Number(d.volume24h) : null,
+      bid1: Number.isFinite(bid) ? bid : null,
+      ask1: Number.isFinite(ask) ? ask : null,
+      spreadBps: Number.isFinite(bid) && Number.isFinite(ask) && mid > 0 ? ((ask - bid) / mid) * 10000 : null,
+    });
+
     this.broadcast("price", { ts: recvTs, t: recvTs, symbol, source, mid, bid: Number.isFinite(bid) ? bid : undefined, ask: Number.isFinite(ask) ? ask : undefined, exchTs });
 
     if (this.logger) {
@@ -480,7 +514,12 @@ export class FeedManager {
     const ws = this._ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-    const desired = new Set(this.symbols.map((s) => `tickers.${s}`));
+    const desired = new Set();
+    for (const s of this.symbols) {
+      desired.add(`tickers.${s}`);
+      desired.add(`publicTrade.${s}`);
+      desired.add(`allLiquidation.${s}`);
+    }
     const current = this._subscribedTopics;
 
     if (full && current.size) {
@@ -556,5 +595,59 @@ export class FeedManager {
       this.logger?.log("bar", { symbol: s, source, t: now, mid, r });
       }
     }
+  }
+
+  _trimWindow(map, cutoffMs) {
+    for (const [k, arr] of map.entries()) {
+      while (arr.length && arr[0].ts < cutoffMs) arr.shift();
+      if (!arr.length) map.delete(k);
+    }
+  }
+
+  _applyPublicTrade(topic, d) {
+    const symbol = d?.s || topic.split(".")[1];
+    if (!symbol) return;
+    const ts = Number(d?.T || d?.ts || Date.now());
+    const side = String(d?.S || d?.side || "");
+    const size = Number(d?.v || d?.size || d?.q);
+    const price = Number(d?.p || d?.price);
+    if (!Number.isFinite(size) || size <= 0) return;
+    const item = { ts: Number.isFinite(ts) ? ts : Date.now(), side, size, price: Number.isFinite(price) ? price : null };
+    const arr = this.trades.get(symbol) || [];
+    arr.push(item);
+    this.trades.set(symbol, arr);
+    this._trimWindow(this.trades, Date.now() - (60 * 60 * 1000));
+  }
+
+  _applyLiquidation(topic, d) {
+    const symbol = d?.symbol || topic.split(".")[1];
+    if (!symbol) return;
+    const ts = Number(d?.T || d?.ts || Date.now());
+    const side = String(d?.S || d?.side || "");
+    const size = Number(d?.v || d?.size || 0);
+    const price = Number(d?.p || d?.price || 0);
+    if (!Number.isFinite(size) || size <= 0) return;
+    const arr = this.liquidations.get(symbol) || [];
+    arr.push({ ts: Number.isFinite(ts) ? ts : Date.now(), side, size, price: Number.isFinite(price) ? price : null });
+    this.liquidations.set(symbol, arr);
+    this._trimWindow(this.liquidations, Date.now() - (60 * 60 * 1000));
+  }
+
+  getTickerSnapshot(symbol) {
+    return this.tickersSnapshot.get(String(symbol || "").toUpperCase()) || null;
+  }
+
+  getTrades(symbol, windowMs = 5 * 60 * 1000) {
+    const sym = String(symbol || "").toUpperCase();
+    const arr = this.trades.get(sym) || [];
+    const cut = Date.now() - windowMs;
+    return arr.filter((x) => x.ts >= cut);
+  }
+
+  getLiquidations(symbol, windowMs = 15 * 60 * 1000) {
+    const sym = String(symbol || "").toUpperCase();
+    const arr = this.liquidations.get(sym) || [];
+    const cut = Date.now() - windowMs;
+    return arr.filter((x) => x.ts >= cut);
   }
 }

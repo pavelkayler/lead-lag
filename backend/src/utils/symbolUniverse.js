@@ -11,7 +11,7 @@ export class SymbolUniverse {
     this.cacheMs = 60 * 60 * 1000;
   }
 
-  async getTopUSDTPerps({ count = 30, minMarketCapUsd = 10_000_000 } = {}) {
+  async getTopUSDTPerps({ count = 100, minMarketCapUsd = 10_000_000 } = {}) {
     if (this.cache && (nowMs() - this.cache.ts) < this.cacheMs) return this.cache.symbols;
 
     const cmcKey = process.env.CMC_API_KEY || process.env.COINMARKETCAP_API_KEY || "";

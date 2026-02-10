@@ -13,7 +13,7 @@ export function AppProviders({ children }) {
   const [wsUrl, setWsUrl] = useState(DEFAULT_WS_URL);
   const [status, setStatus] = useState("disconnected");
   const [clientId, setClientId] = useState(null);
-  const [feedMaxSymbols, setFeedMaxSymbols] = useState(50);
+  const [feedMaxSymbols, setFeedMaxSymbols] = useState(100);
   const [symbols, setSymbolsState] = useState([]);
   const [prices, setPrices] = useState({});
   const [leadlag, setLeadlag] = useState([]);
@@ -48,7 +48,7 @@ export function AppProviders({ children }) {
       setStatus("connected");
       try {
         const st = await sendCommand("getStatus", {});
-        setFeedMaxSymbols(st.feedMaxSymbols || 50);
+        setFeedMaxSymbols(st.feedMaxSymbols || 100);
         setSymbolsState(st.feed?.symbols || []);
         for (const topic of ["price", "bar", "leadlag", "metrics", "tradeState", "paperTest"]) {
           try { await sendCommand("subscribe", { topic }); } catch {}

@@ -19,6 +19,7 @@ const DEFAULT_PRESET = {
   maxHoldBars: 20,
   cooldownBars: 20,
   entryStrictness: 65,
+  blacklistSymbols: [],
 };
 
 const DEFAULT_PRESETS = [
@@ -44,6 +45,7 @@ export class PaperTestRunner {
     this.status = { running: false, runId: null, startedAt: null, endsAt: null, note: "Idle", presets: [], presetsByHour: [], topPairs: [], learning: this.advisor.getLearningPayload(), state: "STOPPED" };
     this.resultsDir = path.join(process.cwd(), "results");
     this.latestPath = path.join(this.resultsDir, "latest.json");
+    this.presetsPath = path.join(this.resultsDir, "presets.json");
     this.lastKnownTradeCount = 0;
     this.instances = new Map();
     this.lastNoTradeAt = Date.now();
@@ -52,6 +54,12 @@ export class PaperTestRunner {
     this.presetsCatalog = clone(DEFAULT_PRESETS);
     this.presetStats = {};
     fs.mkdirSync(this.resultsDir, { recursive: true });
+    try {
+      if (fs.existsSync(this.presetsPath)) {
+        const saved = JSON.parse(fs.readFileSync(this.presetsPath, "utf8"));
+        if (Array.isArray(saved) && saved.length) this.presetsCatalog = saved;
+      }
+    } catch {}
   }
 
   getStatus() { return clone(this.status); }
@@ -168,14 +176,16 @@ export class PaperTestRunner {
   }
 
   async _pickSymbols({ symbolsCount, minMarketCapUsd }) {
-    const requestedCount = Math.max(1, Number(symbolsCount) || 100);
-    const picked = await this.cmc.getUniverseFromRating({ limit: requestedCount, minMarketCapUsd, listingsLimit: 500 });
-    const examples = picked.slice(0, 8);
-    this.advisor.logEvent("universe", `Universe: picked ${picked.length} symbols (cap>${(minMarketCapUsd / 1_000_000).toFixed(0)}M), examples: ${examples.join(", ") || "-"}.`);
-    if (picked.length >= requestedCount) return picked;
+    const requestedCount = Math.max(3, Number(symbolsCount) || 300);
+    const picked = await this.cmc.getUniverseFromRating({ limit: requestedCount, minMarketCapUsd, listingsLimit: 600 });
+    const leaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+    const mergedLeaders = [...leaders.filter((x) => picked.includes(x)), ...picked.filter((x) => !leaders.includes(x))];
+    const examples = mergedLeaders.slice(0, 8);
+    this.advisor.logEvent("universe", `Universe: picked ${mergedLeaders.length} symbols (cap>${(minMarketCapUsd / 1_000_000).toFixed(0)}M), leaders=BTC/ETH/SOL, examples: ${examples.join(", ") || "-"}.`);
+    if (mergedLeaders.length >= requestedCount) return mergedLeaders.slice(0, requestedCount);
 
     const fallback = await this.universe.getTopUSDTPerps({ count: requestedCount, minMarketCapUsd });
-    const merged = Array.from(new Set([...picked, ...fallback])).slice(0, requestedCount);
+    const merged = Array.from(new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT", ...mergedLeaders, ...fallback])).slice(0, requestedCount);
     this.advisor.logEvent("universe", `Universe fallback used: доступно ${picked.length}, расширено до ${merged.length}.`);
     return merged;
   }
@@ -207,16 +217,29 @@ export class PaperTestRunner {
     this.advisor.logEvent("wait", `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}`);
     if ((now - this.lastStrictnessTuneAt) > 30_000) {
       this.lastStrictnessTuneAt = now;
-      for (const it of this.instances.values()) {
+      const targets = this.instances.size ? Array.from(this.instances.values()) : [{ strategy: this.strategy, preset: this.status.currentPreset || this.presetsCatalog[0] }];
+      for (const it of targets) {
         const cur = Number(it.strategy?.getParams?.().entryStrictness ?? it.preset.entryStrictness ?? 65);
         if (cur > 15) {
           const next = Math.max(10, cur - 5);
-          it.strategy.setParams({ entryStrictness: next });
-          this.advisor.logEvent("strictness", `Авто-смягчение входа: ${it.preset.name} ${cur}→${next}.`);
+          const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+          const cloneName = `${it.preset.name} @ ${stamp}`;
+          const cloned = { ...it.preset, name: cloneName, entryStrictness: next, blacklistSymbols: [...(it.preset.blacklistSymbols || [])] };
+          this.upsertPreset(cloned);
+          it.preset = cloned;
+          it.strategy.setParams({ ...cloned, name: cloneName, fixedLeaders: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] });
+          this.advisor.logEvent("strictness", `Создан новый пресет ${cloneName} из ${it.preset.name}, изменения: {entryStrictness:${cur}->${next}}`);
         }
       }
+      this.status.presets = this.listPresets();
+      this._broadcast();
     }
     this.lastWaitLogAt = now;
+  }
+
+
+  _persistPresets() {
+    try { fs.writeFileSync(this.presetsPath, JSON.stringify(this.presetsCatalog, null, 2)); } catch {}
   }
 
   listPresets() {
@@ -241,16 +264,18 @@ export class PaperTestRunner {
     const idx = this.presetsCatalog.findIndex((p) => p.name === name);
     if (idx >= 0) this.presetsCatalog[idx] = next;
     else this.presetsCatalog.push(next);
+    this._persistPresets();
     return clone(next);
   }
 
   deletePreset(name) {
     const n = String(name || "").trim();
     this.presetsCatalog = this.presetsCatalog.filter((p) => p.name !== n);
+    this._persistPresets();
     return this.listPresets();
   }
 
-  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 100, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, multiStrategy = false, exploitBest = false, isolatedPresetName = null, entryStrictness = null } = {}) {
+  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 300, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, multiStrategy = false, exploitBest = false, isolatedPresetName = null } = {}) {
     if (this.running) return this.getStatus();
     this.running = true;
     this.stopRequested = false;
@@ -277,7 +302,7 @@ export class PaperTestRunner {
     } catch {
       symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"].slice(0, Math.max(1, Number(symbolsCount) || 5));
     }
-    this.feed.setSymbols(symbols.slice(0, 100));
+    this.feed.setSymbols(symbols.slice(0, 300));
     if (!this.feed.running) this.feed.start();
 
     this.broker.reset();
@@ -287,14 +312,14 @@ export class PaperTestRunner {
       for (const preset of usePresets) {
         const broker = new PaperBroker({ logger: this.logger });
         const strategy = new LeadLagPaperStrategy({ feed: this.feed, leadLag: this.leadLag, broker, hub: this.hub, logger: this.logger });
-        strategy.setParams({ ...preset, entryStrictness: entryStrictness ?? preset.entryStrictness ?? 65, enabled: true, name: preset.name });
+        strategy.setParams({ ...preset, enabled: true, name: preset.name, fixedLeaders: ["BTCUSDT","ETHUSDT","SOLUSDT"] });
         strategy.enable(true);
         strategy.start();
         this.instances.set(preset.name, { broker, strategy, preset });
       }
     } else {
       this.instances.clear();
-      this.strategy.setParams({ ...usePresets[0], entryStrictness: entryStrictness ?? usePresets[0].entryStrictness ?? 65, enabled: true, name: usePresets[0].name });
+      this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name, fixedLeaders: ["BTCUSDT","ETHUSDT","SOLUSDT"] });
       this.strategy.enable(true);
     }
 
@@ -303,7 +328,7 @@ export class PaperTestRunner {
       runId,
       startedAt,
       endsAt: null,
-      symbols: symbols.slice(0, 100),
+      symbols: symbols.slice(0, 300),
       presets: usePresets,
       currentPreset: usePresets[0],
       presetsByHour: [],
@@ -330,7 +355,7 @@ export class PaperTestRunner {
           if (!multiStrategy) {
             const preset = usePresets[i % usePresets.length];
             this.status.currentPreset = preset;
-            this.strategy.setParams({ ...preset, entryStrictness: entryStrictness ?? preset.entryStrictness ?? 65, enabled: true, name: preset.name });
+            this.strategy.setParams({ ...preset, enabled: true, name: preset.name, fixedLeaders: ["BTCUSDT","ETHUSDT","SOLUSDT"] });
           }
 
           const before = this._aggregateSummary();

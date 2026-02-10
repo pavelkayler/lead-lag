@@ -18,7 +18,7 @@ export function HedgePage() {
 
   const refreshTradeState = async () => {
     await app.sendCommand("reconcileTradeState", {}).catch(() => {});
-    await app.sendCommand("getTradeState", { maxOrders: 100, maxExecutions: 100 }).catch(() => {});
+    await app.getTradeState({ maxOrders: 100, maxExecutions: 100 }).catch(() => {});
   };
 
   useEffect(() => {

@@ -143,4 +143,13 @@ export class BybitRestClient {
   async marketTickers({ category } = {}) {
     return this.publicGet("/v5/market/tickers", { category });
   }
+
+  async marketKline({ category = "linear", symbol, interval = "15", limit = 200 } = {}) {
+    return this.publicGet("/v5/market/kline", {
+      category,
+      symbol,
+      interval,
+      limit,
+    });
+  }
 }

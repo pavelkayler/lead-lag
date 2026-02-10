@@ -422,7 +422,7 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
         risk: { enableTrading: risk.enableTrading, haltTrading: risk.haltTrading, maxNotionalUSDT: risk.maxNotionalUSDT, orderTimeoutMs: risk.orderTimeoutMs, maxOpenOrders: risk.maxOpenOrders },
         tradeState: tradeState ? tradeState.summary() : null,
       paper: { params: strat.getParams(), state: paper.getState() },
-      feedMaxSymbols: Number(process.env.FEED_MAX_SYMBOLS || 100),
+      feedMaxSymbols: Number(process.env.FEED_MAX_SYMBOLS || 300),
       };
     },
 
@@ -473,7 +473,7 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
 
     async setSymbols(payload) {
       const symbols = payload?.symbols;
-      const max = Number(process.env.FEED_MAX_SYMBOLS || 100);
+      const max = Number(process.env.FEED_MAX_SYMBOLS || 300);
       if (!Array.isArray(symbols) || symbols.length === 0) throw new Error("Необходимо указать список символов");
       if (symbols.length > max) throw new Error(`Превышен лимит символов: максимум ${max}`);
       feed.setSymbols(symbols.map((s) => String(s).toUpperCase()));
@@ -482,14 +482,14 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
     },
 
     async getUniverseFromRating(payload = {}) {
-      const limit = Math.max(1, Math.min(100, Number(payload.limit) || 100));
+      const limit = Math.max(1, Math.min(300, Number(payload.limit) || 300));
       const minMarketCapUsd = Number(payload.minMarketCapUsd || 10_000_000);
       const symbols = await paperTest.cmc.getUniverseFromRating({ limit, minMarketCapUsd, listingsLimit: 500 });
       return { symbols, limit, minMarketCapUsd };
     },
 
     async getSymbolsFromRating(payload = {}) {
-      const limit = Math.max(1, Math.min(100, Number(payload.limit) || 100));
+      const limit = Math.max(1, Math.min(300, Number(payload.limit) || 300));
       const minCapUsd = Number(payload.minCapUsd || payload.minMarketCapUsd || 10_000_000);
       const symbols = await paperTest.cmc.getUniverseFromRating({ limit, minMarketCapUsd: minCapUsd, listingsLimit: 500 });
       return { symbols, limit, minCapUsd };
@@ -504,6 +504,27 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
       if (!symbol || typeof symbol !== "string") throw new Error("getBars: payload.symbol must be string");
       const n = Math.max(0, Math.min(MAX_BARS_SNAPSHOT, Number(nRaw) || 0));
       return { symbol, bars: feed.getBars(symbol, n) };
+    },
+
+    async getKlines(payload = {}) {
+      const symbol = String(payload.symbol || "").toUpperCase();
+      if (!symbol) throw new Error("getKlines: payload.symbol required");
+      const tfMap = { "5m": "5", "15m": "15", "1h": "60", "4h": "240" };
+      const timeframe = String(payload.timeframe || "15m").toLowerCase();
+      const interval = tfMap[timeframe] || "15";
+      const limit = Math.max(10, Math.min(500, Number(payload.limit) || 200));
+      const resp = await rest.marketKline({ category: "linear", symbol, interval, limit });
+      const list = Array.isArray(resp?.result?.list) ? resp.result.list : [];
+      const bars = list.map((row) => ({
+        t: Number(row[0]),
+        open: Number(row[1]),
+        high: Number(row[2]),
+        low: Number(row[3]),
+        close: Number(row[4]),
+        volume: Number(row[5]),
+        turnover: Number(row[6]),
+      })).filter((x) => Number.isFinite(x.t)).sort((a,b)=>a.t-b.t);
+      return { symbol, timeframe, bars };
     },
 
     async getLeadLag(payload) {

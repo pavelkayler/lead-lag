@@ -26,6 +26,8 @@ export class LeadLagService {
       impulses: typeof p?.impulses === "number" ? p.impulses : null,
       followerMeanAfterImpulse: typeof p?.followerMeanAfterImpulse === "number" ? p.followerMeanAfterImpulse : null,
       samples: typeof p?.samples === "number" ? p.samples : null,
+      confirmScore: typeof p?.confirmScore === "number" ? p.confirmScore : null,
+      confirmLabel: p?.confirmLabel || "NO_DATA",
     }));
 
     return {

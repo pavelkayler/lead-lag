@@ -76,6 +76,9 @@ export function computeLeadLagPairs({
   impulseZ = 2.5,
   topK = 15,
   minCorr = 0.05,
+  minSamples = 80,
+  minImpulses = 3,
+  minFollowerMove = 0.00005,
 } = {}) {
   const symbols = Object.keys(returnsBySymbol || {}).filter(Boolean);
   const latest = {
@@ -121,6 +124,7 @@ export function computeLeadLagPairs({
       }
 
       if (best.corr == null || best.corr < minCorr) continue;
+      if (!Number.isFinite(best.samples) || best.samples < minSamples) continue;
 
       // impulse response (simple): mean follower return at t+bestLag when leader has impulse
       const leaderStd = std(leaderR);
@@ -142,6 +146,12 @@ export function computeLeadLagPairs({
 
       const followerMeanAfterImpulse = impulses ? (sumFollower / impulses) : null;
 
+      let confirmScore = 0;
+      if (best.samples >= minSamples) confirmScore += 1;
+      if (impulses >= minImpulses) confirmScore += 1;
+      if (Number.isFinite(followerMeanAfterImpulse) && Math.abs(followerMeanAfterImpulse) >= minFollowerMove) confirmScore += 1;
+      const confirmLabel = confirmScore >= 3 ? "OK" : (confirmScore >= 2 ? "WEAK" : "NO_DATA");
+
       pairs.push({
         leader,
         follower,
@@ -151,6 +161,8 @@ export function computeLeadLagPairs({
         samples: best.samples,
         impulses,
         followerMeanAfterImpulse,
+        confirmScore,
+        confirmLabel,
       });
     }
   }

@@ -2,9 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, Col, Form, ProgressBar, Row, Table, Tab, Tabs, Toast, ToastContainer } from "react-bootstrap";
 import { useApp } from "../../app/providers/AppProviders";
 
-function fmtDuration(startTs) {
-  if (!startTs) return "00:00:00";
-  const sec = Math.max(0, Math.floor((Date.now() - Number(startTs)) / 1000));
+function fmtDurationBySec(secRaw) {
+  const sec = Math.max(0, Math.floor(Number(secRaw) || 0));
   const h = String(Math.floor(sec / 3600)).padStart(2, "0");
   const m = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
   const s = String(sec % 60).padStart(2, "0");
@@ -34,25 +33,34 @@ export function PaperTestPage() {
   }, []);
 
   const learning = app.paperTest?.learning || {};
+  const summary = app.paperTest?.summary || {};
   const learningState = learning.state || app.paperTest?.state || "STOPPED";
   const isRunning = learningState !== "STOPPED";
 
+  const startedAt = Number(summary.startedAt || app.paperTest?.startedAt || 0);
+  const endsAt = Number(summary.endsAt || app.paperTest?.endsAt || 0);
+  const now = Date.now() + tick * 0;
+  const durationSec = isRunning
+    ? (startedAt ? Math.max(0, (now - startedAt) / 1000) : 0)
+    : (startedAt && endsAt ? Math.max(0, (endsAt - startedAt) / 1000) : Number(summary.durationSec || 0));
+
   const selectedPresets = useMemo(() => presets.filter((p) => selectedPresetIds.includes(p.name)), [presets, selectedPresetIds]);
-  const summary = app.paperTest?.summary || {};
 
   const start = async () => {
     const single = presets.find((p) => p.name === isolatedPresetName);
     const presetsPayload = multiStrategy ? selectedPresets : (single ? [single] : []);
-    await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 300, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName });
-    setShowToast(true);
+    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 300, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName });
+    if (res?.queued) setShowToast(true);
   };
 
   const openOrders = app.tradeState?.openOrders || [];
   const positions = app.tradeState?.positions || [];
   const executions = app.tradeState?.executions || [];
 
+  const detailRows = Object.entries(summary).filter(([k, v]) => !["endsAt", "startingBalanceUSDT", "equityUSDT", "trades", "wins", "losses", "netPnlUSDT", "startedAt", "durationSec", "perPreset"].includes(k) && typeof v !== "object");
+
   return <>
-    <ToastContainer position="top-end" className="p-2"><Toast bg="success" delay={1100} show={showToast} autohide onClose={() => setShowToast(false)}><Toast.Body className="text-white">Тест отправлен на запуск</Toast.Body></Toast></ToastContainer>
+    <ToastContainer position="top-end" className="p-2"><Toast bg="success" delay={1200} show={showToast} autohide onClose={() => setShowToast(false)}><Toast.Body className="text-white">Тест поставлен в очередь и запускается в фоне</Toast.Body></Toast></ToastContainer>
     <Row className="g-3">
       <Col md={12}><Card body>
         <div className="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2"><h6 className="mb-0">Paper Test</h6><Badge bg={isRunning ? "success" : "secondary"}>{isRunning ? "Тест запущен" : "Тест остановлен"}</Badge></div>
@@ -66,9 +74,9 @@ export function PaperTestPage() {
 
       <Col md={12}><Card body><h6 className="mb-2">Сводка</h6>
         <Tabs defaultActiveKey="short">
-          <Tab eventKey="short" title="Кратко"><Table size="sm" style={{ tableLayout: "fixed" }}><tbody>
-            <tr><td style={{ width: "40%" }}>Время окончания</td><td>{summary.endsAt ? new Date(Number(summary.endsAt)).toLocaleString("ru-RU") : "-"}</td></tr>
-            <tr><td>Длительность</td><td>{isRunning ? fmtDuration(summary.startedAt) : fmtDuration(summary.startedAt + tick * 0)}</td></tr>
+          <Tab eventKey="short" title="Кратко"><Table size="sm" style={{ tableLayout: "fixed" }}><tbody style={{ fontVariantNumeric: "tabular-nums" }}>
+            <tr><td style={{ width: "38%" }}>Время окончания</td><td>{isRunning ? "в процессе" : (endsAt ? new Date(endsAt).toLocaleString("ru-RU") : "-")}</td></tr>
+            <tr><td>Длительность</td><td>{fmtDurationBySec(durationSec)}</td></tr>
             <tr><td>Нач. баланс</td><td>{Number(summary.startingBalanceUSDT || 0).toFixed(2)} USDT</td></tr>
             <tr><td>Эквити</td><td>{Number(summary.equityUSDT || 0).toFixed(2)} USDT</td></tr>
             <tr><td>Сделки</td><td>{summary.trades || 0}</td></tr>
@@ -76,7 +84,7 @@ export function PaperTestPage() {
             <tr><td>Поражения</td><td>{summary.losses || 0}</td></tr>
             <tr><td>Чистый PnL</td><td>{Number(summary.netPnlUSDT || 0).toFixed(2)} USDT</td></tr>
           </tbody></Table></Tab>
-          <Tab eventKey="detail" title="Детально"><Table size="sm" style={{ tableLayout: "fixed" }}><tbody>{Object.entries(summary).filter(([k]) => !["endsAt", "startingBalanceUSDT", "equityUSDT", "trades", "wins", "losses", "netPnlUSDT", "startedAt"].includes(k)).map(([k, v]) => <tr key={k}><td style={{ width: "40%" }}>{k}</td><td>{typeof v === "number" ? v.toFixed(4) : JSON.stringify(v)}</td></tr>)}</tbody></Table></Tab>
+          <Tab eventKey="detail" title="Детально"><Table size="sm" style={{ tableLayout: "fixed" }}><tbody style={{ fontVariantNumeric: "tabular-nums" }}>{detailRows.map(([k, v]) => <tr key={k}><td style={{ width: "38%" }}>{k}</td><td>{typeof v === "number" ? v.toFixed(4) : String(v)}</td></tr>)}</tbody></Table></Tab>
         </Tabs>
       </Card></Col>
 
@@ -85,7 +93,7 @@ export function PaperTestPage() {
         <div className="small mb-1">Тест: <b>{isRunning ? "запущен" : "остановлен"}</b> • Статус: <b>{learningState}</b></div>
         <ProgressBar className="mb-2" striped={learningState === "RUNNING_WAITING"} animated={learningState === "RUNNING_WAITING"} variant={learningState === "RUNNING_IN_TRADE" ? "success" : "info"} now={learningState === "RUNNING_IN_TRADE" ? 100 : (isRunning ? 50 : 0)} />
         <div style={{ height: 220, minHeight: 220, resize: "vertical", overflowY: "auto", border: "1px solid rgba(0,0,0,0.1)", borderRadius: 8, padding: 8, background: "#fff" }}>
-          {(learning.log || []).length ? [...(learning.log || [])].reverse().map((line, idx) => <div className="small" key={idx}>{line}</div>) : <div className="small text-muted">Лог пока пуст.</div>}
+          {(learning.log || []).length ? (learning.log || []).map((line, idx) => <div className="small" key={idx}>{line}</div>) : <div className="small text-muted">Лог пока пуст.</div>}
         </div>
       </Card></Col>
 
@@ -94,7 +102,7 @@ export function PaperTestPage() {
         <Tabs defaultActiveKey="orders">
           <Tab eventKey="orders" title={`Открытые ордера (${openOrders.length})`}><Table size="sm"><thead><tr><th>Пара</th><th>Сторона</th><th>Qty</th><th>Статус</th></tr></thead><tbody>{openOrders.map((o, i) => <tr key={i}><td>{o.symbol}</td><td>{o.side}</td><td>{o.qty || o.leavesQty}</td><td>{o.orderStatus || o.order_status || "-"}</td></tr>)}</tbody></Table></Tab>
           <Tab eventKey="positions" title={`Позиции (${positions.length})`}><Table size="sm"><thead><tr><th>Пара</th><th>Сторона</th><th>Размер</th><th>PnL</th></tr></thead><tbody>{positions.map((p, i) => <tr key={i}><td>{p.symbol}</td><td>{p.side}</td><td>{p.size}</td><td>{p.unrealisedPnl}</td></tr>)}</tbody></Table></Tab>
-          <Tab eventKey="history" title={`История (${(app.paperTest?.trades || []).length})`}><Table size="sm"><thead><tr><th>Время</th><th>Пресет</th><th>Пара</th><th>Сторона</th><th>PnL</th></tr></thead><tbody>{(app.paperTest?.trades || []).slice(0, 150).map((t, i) => <tr key={i}><td>{new Date(Number(t.ts || Date.now())).toLocaleTimeString("ru-RU")}</td><td>{t.meta?.presetName || "-"}</td><td>{t.symbol}</td><td>{t.side}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{Number(t.pnlUSDT || 0).toFixed(2)}</td></tr>)}</tbody></Table></Tab>
+          <Tab eventKey="history" title={`История (${executions.length})`}><Table size="sm"><thead><tr><th>Время</th><th>Пара</th><th>Сторона</th><th>Qty</th><th>Цена</th></tr></thead><tbody>{executions.slice(0, 150).map((t, i) => <tr key={i}><td>{t.execTime ? new Date(Number(t.execTime)).toLocaleTimeString("ru-RU") : "-"}</td><td>{t.symbol}</td><td>{t.side}</td><td>{t.execQty}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{Number(t.execPrice || 0).toFixed(4)}</td></tr>)}</tbody></Table></Tab>
         </Tabs>
       </Card></Col>
     </Row>

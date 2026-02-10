@@ -41,6 +41,7 @@ export class LeadLagService {
       samples: typeof p?.samples === "number" ? p.samples : null,
       confirmScore: typeof p?.confirmScore === "number" ? p.confirmScore : null,
       confirmLabel: p?.confirmLabel || "NO_DATA",
+      insufficientSamples: !!p?.insufficientSamples,
       correlationLabel: "Корреляция",
     };
     });

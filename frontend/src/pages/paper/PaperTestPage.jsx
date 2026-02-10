@@ -21,10 +21,6 @@ export function PaperTestPage() {
   const [tick, setTick] = useState(0);
 
   const presets = app.presets || [];
-  useEffect(() => {
-    if (!presets.length) return;
-    if (!isolatedPresetName) setIsolatedPresetName(presets[0].name);
-  }, [presets, isolatedPresetName]);
 
   useEffect(() => {
     const t = setInterval(() => setTick((x) => x + 1), 1000);
@@ -44,9 +40,7 @@ export function PaperTestPage() {
     : (startedAt && endsAt ? Math.max(0, (endsAt - startedAt) / 1000) : Number(summary.durationSec || 0));
 
   const start = async () => {
-    const single = presets.find((p) => p.name === isolatedPresetName);
-    const presetsPayload = single ? [single] : [];
-    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy: false, exploitBest, testOnlyPresetName: isolatedPresetName || null, useBybit, useBinance });
+    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, multiStrategy: false, exploitBest, testOnlyPresetName: isolatedPresetName || null, useBybit, useBinance });
     if (res?.queued) setShowToast(true);
   };
 
@@ -64,7 +58,7 @@ export function PaperTestPage() {
         <Form.Label className="mb-1">Длительность (часы): {durationHours}</Form.Label><Form.Range min={1} max={24} value={durationHours} onChange={(e) => setDurationHours(Number(e.target.value))} />
         <div className="mb-2"><Form.Check type="checkbox" label="Эксплуатация лучшего" checked={exploitBest} onChange={(e) => setExploitBest(e.target.checked)} /></div>
         <div className="mb-2 d-flex gap-3 flex-wrap"><Form.Check type="checkbox" label="Use Bybit (BT)" checked={useBybit} onChange={(e) => setUseBybit(e.target.checked)} /><Form.Check type="checkbox" label="Use Binance (BNB)" checked={useBinance} onChange={(e) => setUseBinance(e.target.checked)} /></div>
-        <Form.Group className="mb-2"><Form.Label>Тестировать только</Form.Label><Form.Select value={isolatedPresetName} onChange={(e) => setIsolatedPresetName(e.target.value)} style={{ maxWidth: 340 }}>{presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</Form.Select></Form.Group>
+        <Form.Group className="mb-2"><Form.Label>Тестировать только</Form.Label><Form.Select value={isolatedPresetName} onChange={(e) => setIsolatedPresetName(e.target.value)} style={{ maxWidth: 340 }}><option value="">Все пресеты (обычный режим)</option>{presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</Form.Select></Form.Group>
         <div className="d-flex gap-2 flex-wrap"><Button onClick={() => start().catch(() => {})}>Запустить тест</Button><Button variant="outline-danger" onClick={() => app.stopPaperTest().catch(() => {})}>Остановить</Button><Button variant="outline-secondary" onClick={() => app.sendCommand("resetLearning", {}).catch(() => {})}>Сбросить историю</Button></div>
       </Card></Col>
 

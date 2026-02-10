@@ -139,7 +139,7 @@ export class LeadLagPaperStrategy {
   }
 
   _pairKey(a, b) {
-    return [a, b].sort().join("#");
+    return `${a}->${b}`;
   }
 
   _updateNoMatchCounters(pairs = []) {
@@ -147,24 +147,40 @@ export class LeadLagPaperStrategy {
       .filter((x) => this.allowedSources.has(String(x?.source || "").toUpperCase()));
     if (!series.length) return;
 
-    const valid = new Set();
+    const checkedPairs = new Set();
     const matched = new Set();
     for (const p of pairs) {
       const leader = `${String(this._symbolBase(p.leaderBase || p.leader) || "").toUpperCase()}|${String(p.leaderSource || "BT").toUpperCase()}`;
       const follower = `${String(this._symbolBase(p.followerBase || p.follower) || "").toUpperCase()}|${String(p.followerSource || "BT").toUpperCase()}`;
       if (!leader || !follower || leader === follower) continue;
-      const pk = this._pairKey(leader, follower);
-      valid.add(pk);
-      if (Number(p.confirmScore || p.confirm || 1) > 0) matched.add(pk);
+      if (p.insufficientSamples === true || String(p.confirmLabel || "").toUpperCase() === "INSUFFICIENT_SAMPLES") continue;
+      const forward = this._pairKey(leader, follower);
+      const reverse = this._pairKey(follower, leader);
+      checkedPairs.add(forward);
+      checkedPairs.add(reverse);
+      const isMatch = Number(p.confirmScore || p.confirm || 0) >= 3 && String(p.confirmLabel || "").toUpperCase() === "OK";
+      if (isMatch) {
+        matched.add(forward);
+        matched.add(reverse);
+      }
     }
 
     const keys = series.map((s) => `${String(s?.symbol || "").toUpperCase()}|${String(s?.source || "BT").toUpperCase()}`);
     for (let i = 0; i < keys.length; i++) {
       for (let j = i + 1; j < keys.length; j++) {
-        const pk = this._pairKey(keys[i], keys[j]);
-        if (!valid.has(pk)) continue;
-        if (matched.has(pk)) this.noMatchPairCount.set(pk, 0);
-        else this.noMatchPairCount.set(pk, Number(this.noMatchPairCount.get(pk) || 0) + 1);
+        const left = keys[i];
+        const right = keys[j];
+        const fwd = this._pairKey(left, right);
+        const rev = this._pairKey(right, left);
+        if (!checkedPairs.has(fwd) && !checkedPairs.has(rev)) continue;
+        const isMatched = matched.has(fwd) || matched.has(rev);
+        if (isMatched) {
+          this.noMatchPairCount.set(fwd, 0);
+          this.noMatchPairCount.set(rev, 0);
+        } else {
+          this.noMatchPairCount.set(fwd, Number(this.noMatchPairCount.get(fwd) || 0) + 1);
+          this.noMatchPairCount.set(rev, Number(this.noMatchPairCount.get(rev) || 0) + 1);
+        }
       }
     }
 
@@ -174,12 +190,20 @@ export class LeadLagPaperStrategy {
       if (this.autoExcludedSeries.has(key)) continue;
       let minNoMatch = Infinity;
       let worstKey = null;
+      let worstCount = -1;
       for (const other of keys) {
         if (other === key) continue;
         const pk = this._pairKey(key, other);
+        if (!checkedPairs.has(pk)) {
+          minNoMatch = 0;
+          continue;
+        }
         const cnt = Number(this.noMatchPairCount.get(pk) || 0);
         if (cnt < minNoMatch) {
           minNoMatch = cnt;
+        }
+        if (cnt > worstCount) {
+          worstCount = cnt;
           worstKey = other;
         }
       }
@@ -194,6 +218,7 @@ export class LeadLagPaperStrategy {
           reason: "no_match_pairwise",
           minNoMatch,
           worstCounterpart: worstKey,
+          worstCount,
           noMatchAsLeaderCount: minNoMatch,
           noMatchAsFollowerCount: minNoMatch,
           threshold: this.autoExcludeNoMatchThreshold,

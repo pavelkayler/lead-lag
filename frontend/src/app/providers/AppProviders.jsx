@@ -126,6 +126,7 @@ export function AppProviders({ children }) {
   const closeAllPositions = () => action("closeAllPositions", () => sendCommand("closeAllPositions", {}));
   const createHedgeOrders = (payload) => action("createHedgeOrders", () => sendCommand("createHedgeOrders", payload));
   const getTradingStatus = () => action("getTradingStatus", () => sendCommand("getTradingStatus", {})).then((s) => (setTradingStatus(s), s));
+  const getTradeState = (opts = {}) => action("getTradeState", () => sendCommand("getTradeState", opts)).then((r) => { setTradeState(r); return r; });
 
   const listPresets = () => action("listPresets", () => sendCommand("listPresets", {})).then((r) => { setPresets(r.presets || []); setPresetStats(r.presetStats || {}); return r; });
   const savePreset = (preset) => action("savePreset", () => sendCommand("savePreset", { preset })).then((r) => { setPresets(r.presets || []); return r; });
@@ -146,7 +147,7 @@ export function AppProviders({ children }) {
   const value = useMemo(() => ({
     wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, setUiError,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
-    startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, listPresets, savePreset, deletePreset,
+    startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
   }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

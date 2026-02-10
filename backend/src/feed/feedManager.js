@@ -97,7 +97,7 @@ export class FeedManager {
   }
 
   setSymbols(symbols) {
-    const uniq = [...new Set(symbols || [])].slice(0, 5);
+    const uniq = [...new Set(symbols || [])].slice(0, 300);
     this.symbols = uniq;
 
     for (const s of uniq) {

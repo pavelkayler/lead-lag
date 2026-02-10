@@ -26,6 +26,8 @@ export class LeadLagPaperStrategy {
     this.trendBars = 5;
     this.trendMinZ = 0.5;
     this.entryStrictness = 65;
+    this.fixedLeaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+    this.blacklistSymbols = new Set();
 
     this._timer = null;
     this._lastLeaderBarT = null;
@@ -59,6 +61,8 @@ export class LeadLagPaperStrategy {
     if (p.trendMinZ != null) this.trendMinZ = Math.max(0, n(p.trendMinZ, this.trendMinZ));
     if (p.entryStrictness != null) this.entryStrictness = Math.min(100, Math.max(0, n(p.entryStrictness, this.entryStrictness)));
     if (p.name != null) this.currentPresetName = String(p.name);
+    if (Array.isArray(p.fixedLeaders)) this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase());
+    if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
 
     this.logger?.log("paper_params", this.getParams());
   }
@@ -84,6 +88,8 @@ export class LeadLagPaperStrategy {
       trendMinZ: this.trendMinZ,
       entryStrictness: this.entryStrictness,
       currentPresetName: this.currentPresetName,
+      fixedLeaders: this.fixedLeaders,
+      blacklistSymbols: Array.from(this.blacklistSymbols),
     };
   }
 
@@ -185,7 +191,7 @@ export class LeadLagPaperStrategy {
     if (this.broker.position) return;
 
     const pairs = this.leadLag.latest?.pairs || [];
-    const top = pairs[0];
+    const top = pairs.find((p) => this.fixedLeaders.includes(String(p.leader || "").toUpperCase()) && !this.blacklistSymbols.has(String(p.follower || "").toUpperCase()));
     const topLeader = top?.leader;
     const topFollower = top?.follower;
     if (this._pendingSetup && (!top || this._pendingSetup.leader !== topLeader || this._pendingSetup.follower !== topFollower)) {
@@ -211,7 +217,7 @@ export class LeadLagPaperStrategy {
       return;
     }
 
-    if (!pairs.length) {
+    if (!pairs.length || !top) {
       this._countReject("noCandidatePairs", "Сканирую пары…");
       return;
     }

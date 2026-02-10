@@ -7,13 +7,13 @@ function clone(obj) { return JSON.parse(JSON.stringify(obj || {})); }
 const DEFAULT_PRESET = {
   name: "profit-first",
   qtyUSDT: 25,
-  minCorr: 0.2,
-  stdBars: 180,
-  impulseZ: 6.0,
-  tpSigma: 25,
-  slSigma: 18,
-  maxHoldBars: 240,
-  cooldownBars: 40,
+  minCorr: 0.15,
+  stdBars: 120,
+  impulseZ: 2.5,
+  tpSigma: 1.5,
+  slSigma: 1.0,
+  maxHoldBars: 20,
+  cooldownBars: 20,
 };
 
 export class PaperTestRunner {

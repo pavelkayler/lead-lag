@@ -50,6 +50,9 @@ export function AppProviders({ children }) {
         const st = await sendCommand("getStatus", {});
         setFeedMaxSymbols(st.feedMaxSymbols || 50);
         setSymbolsState(st.feed?.symbols || []);
+        for (const topic of ["price", "bar", "leadlag", "metrics", "tradeState", "paperTest"]) {
+          try { await sendCommand("subscribe", { topic }); } catch {}
+        }
       } catch (e) { console.error("[ACTION] getStatus error", e); }
     };
     ws.onclose = () => { setStatus("disconnected"); setClientId(null); };

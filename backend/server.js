@@ -871,15 +871,61 @@ const estNotional = qty * mid;
       const longTrigger = mid * (1 + offsetPercent / 100);
       const shortTrigger = mid * (1 - offsetPercent / 100);
       const groupId = `HEDGE-${Date.now()}`;
+
+      let leverage = 10;
+      try {
+        const posResp = await rest.get("/v5/position/list", { category: "linear", symbol });
+        const firstPos = posResp?.result?.list?.[0] || {};
+        const parsedLev = Number(firstPos.leverage);
+        if (Number.isFinite(parsedLev) && parsedLev > 0) leverage = parsedLev;
+      } catch (e) {
+        logger?.log("hedge_leverage_fallback", { symbol, leverage, error: String(e?.message || e) });
+      }
+
       const mkTpSl = (entry, side) => {
-        const isRoi = tp.type === "roiPct";
-        const tpVal = isRoi ? entry * (Number(tp.value) / 100) : Number(tp.value);
-        const slVal = (sl.type === "roiPct") ? entry * (Number(sl.value) / 100) : Number(sl.value);
-        return side === "Buy" ? { takeProfit: String(entry + tpVal), stopLoss: String(entry - slVal) } : { takeProfit: String(entry - tpVal), stopLoss: String(entry + slVal) };
+        const tpType = tp.type || "roiPct";
+        const slType = sl.type || "roiPct";
+        const isBuy = side === "Buy";
+
+        const tpDelta = tpType === "pnlUSDT"
+          ? (Number(tp.value) / Number(qty || 1))
+          : entry * ((Number(tp.value) / Math.max(leverage, 1)) / 100);
+        const slDelta = slType === "pnlUSDT"
+          ? (Number(sl.value) / Number(qty || 1))
+          : entry * ((Number(sl.value) / Math.max(leverage, 1)) / 100);
+
+        return isBuy
+          ? { takeProfit: String(entry + tpDelta), stopLoss: String(entry - slDelta) }
+          : { takeProfit: String(entry - tpDelta), stopLoss: String(entry + slDelta) };
       };
-      const long = await rest.post("/v5/order/create", { category: "linear", symbol, side: "Buy", orderType: "Market", qty: String(qty), triggerPrice: String(longTrigger), triggerDirection: 1, triggerBy: "MarkPrice", orderLinkId: `${groupId}-LONG`, ...mkTpSl(longTrigger, "Buy") });
-      const short = await rest.post("/v5/order/create", { category: "linear", symbol, side: "Sell", orderType: "Market", qty: String(qty), triggerPrice: String(shortTrigger), triggerDirection: 2, triggerBy: "MarkPrice", orderLinkId: `${groupId}-SHORT`, ...mkTpSl(shortTrigger, "Sell") });
-      return { ok: true, groupId, orders: [{ longOrderId: long?.result?.orderId, shortOrderId: short?.result?.orderId }] };
+
+      const long = await orderCreateWithPositionIdxFallback(rest, {
+        category: "linear",
+        symbol,
+        side: "Buy",
+        orderType: "Market",
+        qty: String(qty),
+        triggerPrice: String(longTrigger),
+        triggerDirection: 1,
+        triggerBy: "MarkPrice",
+        orderLinkId: `${groupId}-LONG`,
+        ...mkTpSl(longTrigger, "Buy"),
+      }, logger);
+
+      const short = await orderCreateWithPositionIdxFallback(rest, {
+        category: "linear",
+        symbol,
+        side: "Sell",
+        orderType: "Market",
+        qty: String(qty),
+        triggerPrice: String(shortTrigger),
+        triggerDirection: 2,
+        triggerBy: "MarkPrice",
+        orderLinkId: `${groupId}-SHORT`,
+        ...mkTpSl(shortTrigger, "Sell"),
+      }, logger);
+
+      return { ok: true, groupId, leverage, orders: [{ longOrderId: long?.result?.orderId, shortOrderId: short?.result?.orderId }] };
     },
 
     // Step 9 paper

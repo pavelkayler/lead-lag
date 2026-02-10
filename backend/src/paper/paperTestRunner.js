@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { PresetAdvisor } from "./presetAdvisor.js";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function clone(obj) { return JSON.parse(JSON.stringify(obj || {})); }
@@ -27,7 +28,8 @@ export class PaperTestRunner {
 
     this.running = false;
     this.stopRequested = false;
-    this.status = { running: false, runId: null, startedAt: null, endsAt: null, note: "Idle", presets: [], presetsByHour: [], topPairs: [] };
+    this.advisor = new PresetAdvisor();
+    this.status = { running: false, runId: null, startedAt: null, endsAt: null, note: "Idle", presets: [], presetsByHour: [], topPairs: [], learning: this.advisor.getLearningPayload() };
     this.resultsDir = path.join(process.cwd(), "results");
     this.latestPath = path.join(this.resultsDir, "latest.json");
     fs.mkdirSync(this.resultsDir, { recursive: true });
@@ -57,6 +59,7 @@ export class PaperTestRunner {
       summary: this.broker.getSummary(),
       presetsByHour: this.status.presetsByHour || [],
       topPairs: this._buildTopPairs(),
+      learning: this.advisor.getLearningPayload(),
       note,
     };
   }
@@ -77,8 +80,12 @@ export class PaperTestRunner {
     const runId = `paper-${Date.now()}`;
     const startedAt = Date.now();
     const hours = Math.max(1, Number(durationHours) || 8);
-    const rotateMs = Math.max(1, Number(rotateEveryMinutes) || 60) * 60 * 1000;
+    const stepMs = Math.max(1, Number(rotateEveryMinutes) || 60) * 60 * 1000;
+    const totalMs = hours * 60 * 60 * 1000;
+    const steps = Math.max(1, Math.ceil(totalMs / stepMs));
     const usePresets = Array.isArray(presets) && presets.length ? presets : [DEFAULT_PRESET];
+
+    this.advisor.updateOnStart(usePresets);
 
     let symbols;
     try {
@@ -93,44 +100,44 @@ export class PaperTestRunner {
     this.broker.reset();
     this.strategy.enable(true);
 
-    this.status = { running: true, runId, startedAt, endsAt: null, symbols, presets: usePresets, currentPreset: usePresets[0], presetsByHour: [], topPairs: [], note: "Running" };
+    this.status = { running: true, runId, startedAt, endsAt: null, symbols, presets: usePresets, currentPreset: usePresets[0], presetsByHour: [], topPairs: [], note: "Running", learning: this.advisor.getLearningPayload() };
     this._writeLatest("Running");
     this._broadcast();
 
     (async () => {
       try {
-        for (let h = 0; h < hours; h++) {
+        for (let i = 0; i < steps; i++) {
           if (this.stopRequested) break;
-          const preset = usePresets[h % usePresets.length];
+          const preset = usePresets[i % usePresets.length];
           this.status.currentPreset = preset;
 
           const before = this.broker.getSummary();
           this.strategy.setParams({ ...preset, enabled: true });
           const t0 = Date.now();
-          while (Date.now() - t0 < rotateMs) {
+          while (Date.now() - t0 < stepMs) {
             if (this.stopRequested) break;
             await sleep(1000);
           }
           const after = this.broker.getSummary();
-          const trades = (after.trades || 0) - (before.trades || 0);
-          const wins = (after.wins || 0) - (before.wins || 0);
-          const losses = (after.losses || 0) - (before.losses || 0);
-          const netPnlUSDT = (after.netPnlUSDT || 0) - (before.netPnlUSDT || 0);
-          const feesUSDT = (after.feesUSDT || 0) - (before.feesUSDT || 0);
-          const slippageUSDT = (after.slippageUSDT || 0) - (before.slippageUSDT || 0);
+          const segmentStats = {
+            trades: (after.trades || 0) - (before.trades || 0),
+            wins: (after.wins || 0) - (before.wins || 0),
+            losses: (after.losses || 0) - (before.losses || 0),
+            netPnlUSDT: (after.netPnlUSDT || 0) - (before.netPnlUSDT || 0),
+            feesUSDT: (after.feesUSDT || 0) - (before.feesUSDT || 0),
+            slippageUSDT: (after.slippageUSDT || 0) - (before.slippageUSDT || 0),
+          };
 
           this.status.presetsByHour.push({
-            hour: h + 1,
-            preset: preset.name || `preset-${h + 1}`,
-            trades,
-            wins,
-            losses,
-            winRate: trades ? wins / trades : 0,
-            netPnlUSDT,
-            feesUSDT,
-            slippageUSDT,
+            hour: i + 1,
+            segment: i + 1,
+            preset: preset.name || `preset-${i + 1}`,
+            ...segmentStats,
+            winRate: segmentStats.trades ? segmentStats.wins / segmentStats.trades : 0,
           });
 
+          this.advisor.updateOnSegment(preset, segmentStats, i + 1);
+          this.status.learning = this.advisor.getLearningPayload();
           this.status.topPairs = this._buildTopPairs();
           this._writeLatest("Running");
           this._broadcast();
@@ -143,6 +150,7 @@ export class PaperTestRunner {
         this.status.running = false;
         this.status.endsAt = Date.now();
         this.status.topPairs = this._buildTopPairs();
+        this.status.learning = this.advisor.getLearningPayload();
         const note = this.stopRequested ? `Stopped: ${this.status.note || "user"}` : "Completed";
         this.status.note = note;
         this._writeLatest(note);
@@ -157,6 +165,7 @@ export class PaperTestRunner {
     if (!this.running) return this.getStatus();
     this.stopRequested = true;
     this.status.note = reason;
+    this.status.learning = this.advisor.getLearningPayload();
     this._writeLatest(`Stopped: ${reason}`);
     this._broadcast();
     return this.getStatus();

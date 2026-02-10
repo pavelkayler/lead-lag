@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { RingBuffer } from "./ringBuffer.js";
-import { resolveBybitConfig } from "./bybitEnv.js";
+import { resolveBybitConfig } from "../exchange/bybitEnv.js";
 
 export class FeedManager {
   constructor({ tickMs = 100, barMs = 250, maxBarSeconds = 120, broadcast, logger = null, wsUrl = null } = {}) {

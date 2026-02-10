@@ -138,6 +138,9 @@ export class PresetAdvisor {
     if (net < 0 || winRate < 0.45) {
       changes.minCorr = Number((Math.max(0.05, Number(preset?.minCorr || 0.2) + 0.02)).toFixed(2));
       changes.impulseZ = Number((Math.max(0.6, Number(preset?.impulseZ || 2) + 0.1)).toFixed(2));
+      if (net < 0) {
+        changes.cooldownBars = Math.max(0, Math.round(Number(preset?.cooldownBars || 10) + 2));
+      }
     } else if (winRate > 0.62 && net > 0) {
       changes.tpSigma = Number((Math.min(4, Number(preset?.tpSigma || 1.3) + 0.1)).toFixed(2));
       changes.cooldownBars = Math.max(0, Math.round(Number(preset?.cooldownBars || 10) - 1));
@@ -152,7 +155,7 @@ export class PresetAdvisor {
 
     const patch = { presetName: name, changes };
     return {
-      recommendation: `Рекомендация для preset=${name}: подкрутить ${Object.keys(changes).join(", ")} и проверить на новом отрезке.`,
+      recommendation: `Рекомендация для preset=${name}: подкрутить ${Object.keys(changes).join(", ")} и проверить на новом отрезке. Учитывай, что вход теперь с подтверждением фолловера и edge-gate по издержкам.`,
       proposedPatch: patch,
     };
   }

@@ -264,12 +264,31 @@ export class PaperTestRunner {
 
           const advice = this.advisor.updateOnSegment(preset, segmentStats, i + 1);
 
-          if (autoTune && advice?.proposedPatch && segmentStats.trades >= 10 && this.advisor.canAutoTune({ presetName: advice.proposedPatch.presetName, currentSegment: i + 1, minSegmentGap: 3 })) {
-            const patchRes = this._applyPatchToPreset(usePresets, advice.proposedPatch);
-            usePresets = patchRes.presets;
-            this.status.presets = usePresets;
-            for (const line of patchRes.logs) this.advisor.logEvent("auto-tune", line);
-            this.advisor.markAutoTuneApplied({ presetName: advice.proposedPatch.presetName, segment: i + 1 });
+          if (advice?.proposedPatch && Object.keys(advice.proposedPatch?.changes || {}).length) {
+            const minSegmentGap = 3;
+            const presetName = advice.proposedPatch.presetName;
+            const tradesEnough = segmentStats.trades >= 10;
+            const canTuneNow = this.advisor.canAutoTune({ presetName, currentSegment: i + 1, minSegmentGap });
+
+            if (autoTune && tradesEnough && canTuneNow) {
+              const patchRes = this._applyPatchToPreset(usePresets, advice.proposedPatch);
+              usePresets = patchRes.presets;
+              this.status.presets = usePresets;
+              for (const line of patchRes.logs) this.advisor.logEvent("auto-tune", line);
+              this.advisor.markAutoTuneApplied({ presetName, segment: i + 1 });
+            } else {
+              let reason = "unknown";
+              if (!autoTune) reason = "autoTune=false";
+              else if (!tradesEnough) reason = `trades<10 (trades=${segmentStats.trades})`;
+              else if (!canTuneNow) {
+                const lastSegment = Number(this.advisor.lastTuneSegmentByPreset.get(presetName) || 0);
+                const waitSegments = Math.max(0, minSegmentGap - ((i + 1) - lastSegment));
+                reason = `minSegmentGap not met (ожидаем ещё ${waitSegments} сегм.)`;
+              }
+              this.advisor.logEvent("auto-tune", `Автотюнинг пропущен: причина=${reason} preset=${presetName}`);
+            }
+          } else {
+            this.advisor.logEvent("auto-tune", `Автотюнинг пропущен: причина=proposedPatch отсутствует/пустой preset=${preset.name || "preset"}`);
           }
 
           this.status.learning = this.advisor.getLearningPayload();

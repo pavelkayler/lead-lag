@@ -7,9 +7,9 @@ export function selectUniverse(symbols, featuresMap, rangesMap, cfg) {
     const r = rangesMap[symbol];
     if (!f || !r) continue;
     const blockers = [];
-    blockers.push(blocker("turnover", "Turnover24h >= min", f.turnover24h, cfg.minTurnover24hUSDT, f.turnover24h >= cfg.minTurnover24hUSDT));
-    blockers.push(blocker("atr", "ATRpct15m >= min", f.atrPct15m, cfg.minATRPct15m, Number(f.atrPct15m) >= Number(cfg.minATRPct15m)));
-    if (cfg.useSpreadFilter) blockers.push(blocker("spread", "Spread <= max", f.spreadBps, cfg.maxSpreadBps, Number(f.spreadBps) <= Number(cfg.maxSpreadBps)));
+    blockers.push(blocker("turnover", "Оборот24ч >= минимум", f.turnover24h, cfg.minTurnover24hUSDT, f.turnover24h >= cfg.minTurnover24hUSDT));
+    blockers.push(blocker("atr", "ATR(15м) >= минимум (доля)", f.atrPct15m, cfg.minATRPct15m, Number(f.atrPct15m) >= Number(cfg.minATRPct15m)));
+    if (cfg.useSpreadFilter) blockers.push(blocker("spread", "Спред <= максимум", f.spreadBps, cfg.maxSpreadBps, Number(f.spreadBps) <= Number(cfg.maxSpreadBps)));
 
     const pass = blockers.every((b) => b.pass);
     const activityScore =

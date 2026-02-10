@@ -11,7 +11,7 @@ export const RANGE_DEFAULTS = {
   topN: 15,
   shortlistForSignals: 12,
   minTurnover24hUSDT: 50_000_000,
-  minATRPct15m: 5,
+  minATRPct15m: 0.05,
   useSpreadFilter: false,
   maxSpreadBps: 10,
   useLiquidations: true,
@@ -74,6 +74,7 @@ export const RANGE_DEFAULTS = {
   logNoEntryEvery10s: true,
   noEntryLogIntervalSec: 10,
   slippageBps: 2,
+  staleTickerSec: 30,
 };
 
 export function mergeRangeConfig(partial = {}) {
@@ -89,5 +90,7 @@ export function validateRangeConfig(input = {}) {
   cfg.shortlistForSignals = Math.max(1, Number(cfg.shortlistForSignals) || 10);
   cfg.topN = Math.max(cfg.shortlistForSignals, Number(cfg.topN) || 15);
   cfg.symbols = Array.isArray(cfg.symbols) ? cfg.symbols.map((s) => String(s).toUpperCase()) : RANGE_DEFAULTS.symbols;
+  if (Number(cfg.minATRPct15m) > 1) cfg.minATRPct15m = Number(cfg.minATRPct15m) / 100;
+  cfg.staleTickerSec = Math.max(5, Number(cfg.staleTickerSec) || 30);
   return cfg;
 }

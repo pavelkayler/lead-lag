@@ -19,8 +19,6 @@ function ResponsiveChart({ points = [] }) {
         <rect x="0" y="0" width="1000" height="240" fill="#fff" />
         {grid.map((y) => <line key={y} x1="0" y1={y} x2="1000" y2={y} stroke="#e9ecef" strokeWidth="1" />)}
         <polyline fill="none" stroke="#0d6efd" strokeWidth="2" points={path} />
-        <text x="6" y="14">min {min.toFixed(4)}</text>
-        <text x="6" y="234">max {max.toFixed(4)}</text>
       </svg>
     </div>
   );
@@ -32,11 +30,26 @@ export function DashboardPage() {
   const [chartSymbol, setChartSymbol] = useState("");
   const [subs, setSubs] = useState(() => Object.fromEntries(TOPICS.map((t) => [t, true])));
 
+  const symbolCount = useMemo(() => symbolsText.split(",").map((s) => s.trim()).filter(Boolean).length, [symbolsText]);
+
   useEffect(() => {
     if (!app.symbols?.length) return;
     if (!symbolsText) setSymbolsText(app.symbols.join(","));
     if (!chartSymbol || !app.symbols.includes(chartSymbol)) setChartSymbol(app.symbols[0]);
   }, [app.symbols, chartSymbol, symbolsText]);
+
+  const applyUniverseIfEmpty = async () => {
+    const normalized = symbolsText.split(",").map((s) => s.trim()).filter(Boolean);
+    const isDefaultFive = normalized.length <= 5;
+    if (normalized.length && !isDefaultFive) return;
+    const res = await app.sendCommand("getUniverseFromRating", { limit: 100, minMarketCapUsd: 10_000_000 });
+    setSymbolsText((res?.symbols || []).join(","));
+  };
+
+  useEffect(() => {
+    if (app.status !== "connected") return;
+    applyUniverseIfEmpty().catch(() => {});
+  }, [app.status]);
 
   const rows = useMemo(() => Object.values(app.prices || {}), [app.prices]);
   const top = useMemo(() => (app.leadlag || []).slice(0, 10), [app.leadlag]);
@@ -47,6 +60,17 @@ export function DashboardPage() {
     else await app.unsubscribe(topic);
   };
 
+  const onApplySymbols = async () => {
+    const list = symbolsText.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean).slice(0, 100);
+    await app.setSymbols(list);
+    setSymbolsText(list.join(","));
+  };
+
+  const onFromRating = async () => {
+    const res = await app.sendCommand("getUniverseFromRating", { limit: 100, minMarketCapUsd: 10_000_000 });
+    setSymbolsText((res?.symbols || []).join(","));
+  };
+
   return <Row className="g-3">
     <Col md={12}><Card body>
       <Form.Group className="mb-2"><Form.Label>WS URL</Form.Label><Form.Control value={app.wsUrl} onChange={(e) => app.setWsUrl(e.target.value)} /></Form.Group>
@@ -55,8 +79,8 @@ export function DashboardPage() {
         <span>Статус: <b>{app.status}</b> / ClientId: {app.clientId || "-"}</span>
       </div>
     </Card></Col>
-    <Col md={12}><Card body><Form.Label>Символы ({app.symbols.length}/{app.feedMaxSymbols})</Form.Label>
-      <div className="d-flex gap-2"><Form.Control value={symbolsText} onChange={(e) => setSymbolsText(e.target.value)} /><Button onClick={() => app.setSymbols(symbolsText.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean))}>Применить</Button><Button onClick={app.startFeed}>Старт фид</Button><Button variant="outline-danger" onClick={app.stopFeed}>Стоп фид</Button></div>
+    <Col md={12}><Card body><Form.Label>Символы ({symbolCount}/100)</Form.Label>
+      <div className="d-flex gap-2 flex-wrap"><Form.Control value={symbolsText} onChange={(e) => { setSymbolsText(e.target.value); }} /><Button onClick={() => onApplySymbols().catch(() => {})}>Применить</Button><Button variant="outline-primary" onClick={() => onFromRating().catch(() => {})}>Из рейтинга</Button><Button onClick={app.startFeed}>Старт фид</Button><Button variant="outline-danger" onClick={app.stopFeed}>Стоп фид</Button></div>
       <div className="mt-2 d-flex gap-3 flex-wrap">{TOPICS.map((t) => <Form.Check key={t} type="checkbox" label={t} checked={!!subs[t]} onChange={(e) => onToggleSub(t, e.target.checked)} />)}</div>
     </Card></Col>
     <Col lg={6}><Card body><h6>Цены</h6><Table size="sm"><thead><tr><th>Symbol</th><th>Mid</th></tr></thead><tbody>{rows.map((r) => <tr key={r.symbol}><td>{r.symbol}</td><td>{Number(r.mid || r.price || 0).toFixed(6)}</td></tr>)}</tbody></Table></Card></Col>

@@ -34,6 +34,8 @@ export class LeadLagPaperStrategy {
     this._logCooldownMs = 7000;
     this._lastLogAt = new Map();
     this.currentPresetName = null;
+    this.rejectCounters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
+    this.runtimeStatus = "Сканирую пары…";
   }
 
   setParams(p = {}) {
@@ -128,6 +130,18 @@ export class LeadLagPaperStrategy {
     });
   }
 
+
+  _countReject(key, status = null) {
+    if (this.rejectCounters[key] != null) this.rejectCounters[key] += 1;
+    if (status) this.runtimeStatus = status;
+  }
+
+  consumeRejectStats() {
+    const counters = { ...this.rejectCounters };
+    this.rejectCounters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
+    return { counters, runtimeStatus: this.runtimeStatus };
+  }
+
   _tick() {
     const pos = this.broker.position;
     if (pos) {
@@ -179,6 +193,7 @@ export class LeadLagPaperStrategy {
         this._pendingSetup.expiresInBars -= 1;
         if (this._pendingSetup.expiresInBars <= 0) {
           this.logger?.log("paper_setup", { event: "setup_expired", leader: this._pendingSetup.leader, follower: this._pendingSetup.follower, side: this._pendingSetup.side });
+          this._countReject("setupExpired", "Setup создан, ждём подтверждение…");
           this._pendingSetup = null;
         }
       }
@@ -189,8 +204,12 @@ export class LeadLagPaperStrategy {
       return;
     }
 
-    if (!pairs.length) return;
+    if (!pairs.length) {
+      this._countReject("noCandidatePairs", "Сканирую пары…");
+      return;
+    }
     if (top.corr == null || top.corr < this.minCorr) {
+      this._countReject("corrFail", "Жду корреляцию…");
       this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: this.minCorr }, "skip:corr");
       return;
     }
@@ -216,6 +235,7 @@ export class LeadLagPaperStrategy {
 
     const thr = this.impulseZ * leaderVol;
     if (!this._pendingSetup && Math.abs(lastR) < thr) {
+      this._countReject("impulseFail", "Жду импульс…");
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
       return;
     }
@@ -233,6 +253,7 @@ export class LeadLagPaperStrategy {
       const costsR = (2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0))) / 10_000;
       const edgeGateR = costsR * this.edgeMult;
       if (tpR2 < edgeGateR) {
+        this._countReject("edgeGateFail", "Edge gate блокирует вход…");
         this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, tpR2, edgeGateR, costsR, edgeMult: this.edgeMult }, `gate:edge:${leader}:${follower}`);
         return;
       }
@@ -257,6 +278,7 @@ export class LeadLagPaperStrategy {
         lastLeaderBarT: lastBar.t,
         lastFollowerBarT: null,
       };
+      this.runtimeStatus = "Setup создан, жду подтверждение…";
       this.logger?.log("paper_setup", { event: "setup_created", leader, follower, side, corr: top.corr, tpR1, tpR2, slR, edgeGateR, ttlBars: this.setupTTLbars });
       return;
     }
@@ -283,6 +305,7 @@ export class LeadLagPaperStrategy {
     }
 
     if (!followerConfirmed || !trendConfirmed) {
+      this._countReject("confirmFail", "Setup создан, жду подтверждение…");
       this._logThrottled("paper_trigger_skip", {
         reason: "trigger_confirm_not_met",
         side: setup.side,
@@ -325,6 +348,7 @@ export class LeadLagPaperStrategy {
         },
       });
 
+      this.runtimeStatus = "Сделка открыта";
       this.logger?.log("paper_signal", {
         event: "opened_trade",
         leader: setup.leader,

@@ -16,6 +16,8 @@ export class PresetAdvisor {
   constructor({ maxLog = 400 } = {}) {
     this.maxLog = maxLog;
     this.lastPresetsHash = null;
+    this.lastSettingsHash = null;
+    this.runningSettingsHash = null;
     this.statusText = "нужно тестировать текущие настройки";
     this.totalTrades = 0;
     this.totalSegments = 0;
@@ -49,14 +51,24 @@ export class PresetAdvisor {
 
   updateOnStart(presets = []) {
     const hash = stableStringify(presets);
-    if (this.lastPresetsHash && hash !== this.lastPresetsHash) {
+    this.lastSettingsHash = hash;
+    if (this.runningSettingsHash && this.runningSettingsHash === hash) {
+      this.statusText = "тест с новыми настройками запущен";
+    } else if (this.lastPresetsHash && hash !== this.lastPresetsHash) {
       this.statusText = "выставлены новые настройки, нужны тесты";
-      this.logEvent("settings", "Новые настройки применены, тест начался.");
     } else if (!this.lastPresetsHash) {
       this.statusText = "нужно тестировать текущие настройки";
       this.logEvent("start", "Первичный запуск тестирования пресетов.");
     }
     this.lastPresetsHash = hash;
+  }
+
+  markRunningSettingsHash(presets = []) {
+    this.runningSettingsHash = stableStringify(presets);
+    if (this.runningSettingsHash === this.lastSettingsHash) {
+      this.statusText = "тест с новыми настройками запущен";
+      this.logEvent("settings", "Тест с новыми настройками запущен.");
+    }
   }
 
   recordTrade(ts = Date.now()) {
@@ -181,6 +193,8 @@ export class PresetAdvisor {
     this.lastEtaSec = null;
     this.lastTuneSegmentByPreset.clear();
     this.lastPresetsHash = null;
+    this.lastSettingsHash = null;
+    this.runningSettingsHash = null;
     this.logEvent("reset", "История обучения очищена.");
   }
 
@@ -191,6 +205,8 @@ export class PresetAdvisor {
       log: this.log,
       state: this.currentState,
       etaSec: this.lastEtaSec,
+      lastSettingsHash: this.lastSettingsHash,
+      runningSettingsHash: this.runningSettingsHash,
     };
   }
 }

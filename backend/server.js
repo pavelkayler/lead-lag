@@ -422,7 +422,7 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
         risk: { enableTrading: risk.enableTrading, haltTrading: risk.haltTrading, maxNotionalUSDT: risk.maxNotionalUSDT, orderTimeoutMs: risk.orderTimeoutMs, maxOpenOrders: risk.maxOpenOrders },
         tradeState: tradeState ? tradeState.summary() : null,
       paper: { params: strat.getParams(), state: paper.getState() },
-      feedMaxSymbols: Number(process.env.FEED_MAX_SYMBOLS || 50),
+      feedMaxSymbols: Number(process.env.FEED_MAX_SYMBOLS || 100),
       };
     },
 
@@ -473,12 +473,19 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
 
     async setSymbols(payload) {
       const symbols = payload?.symbols;
-      const max = Number(process.env.FEED_MAX_SYMBOLS || 50);
+      const max = Number(process.env.FEED_MAX_SYMBOLS || 100);
       if (!Array.isArray(symbols) || symbols.length === 0) throw new Error("Необходимо указать список символов");
       if (symbols.length > max) throw new Error(`Превышен лимит символов: максимум ${max}`);
       feed.setSymbols(symbols.map((s) => String(s).toUpperCase()));
       logger?.log("rpc", { op: "setSymbols", symbols });
       return { symbols: feed.symbols || symbols, feedMaxSymbols: max };
+    },
+
+    async getUniverseFromRating(payload = {}) {
+      const limit = Math.max(1, Math.min(100, Number(payload.limit) || 100));
+      const minMarketCapUsd = Number(payload.minMarketCapUsd || 10_000_000);
+      const symbols = await paperTest.cmc.getUniverseFromRating({ limit, minMarketCapUsd, listingsLimit: 500 });
+      return { symbols, limit, minMarketCapUsd };
     },
 
     async startFeed() { feed.start(); logger?.log("rpc", { op: "startFeed" }); return { running: true }; },
@@ -946,10 +953,13 @@ const estNotional = qty * mid;
 async startPaperTest(payload) {
   const durationHours = Number(payload?.durationHours || 8);
   const rotateEveryMinutes = Number(payload?.rotateEveryMinutes || 60);
-  const symbolsCount = Number(payload?.symbolsCount || 30);
+  const symbolsCount = Number(payload?.symbolsCount || 100);
   const minMarketCapUsd = Number(payload?.minMarketCapUsd || 10_000_000);
   const presets = Array.isArray(payload?.presets) ? payload.presets : null;
-  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets });
+  const multiStrategy = !!payload?.multiStrategy;
+  const exploitBest = !!payload?.exploitBest;
+  const isolatedPresetName = payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null;
+  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName });
   // Also push immediate tradeState snapshot to UI
   hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   return res;
@@ -1023,13 +1033,13 @@ const risk = new RiskManager({ allowSymbols: DEFAULT_SYMBOLS, logger });
   const strat = new LeadLagPaperStrategy({ feed, leadLag, broker: paper, hub, logger });  
 
 const universe = new SymbolUniverse({ bybitRest: rest, logger });
-const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger });
+const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger, leadLag, rest });
   const instruments = { normalizeQty };
   const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, instruments, logger });
 
   (async () => {
     try {
-      const top = await universe.getTopUSDTPerps({ count: 50, minMarketCapUsd: 10_000_000 });
+      const top = await universe.getTopUSDTPerps({ count: 100, minMarketCapUsd: 10_000_000 });
       if (Array.isArray(top) && top.length) {
         feed.setSymbols(top);
         risk.allowSymbols = [...top];

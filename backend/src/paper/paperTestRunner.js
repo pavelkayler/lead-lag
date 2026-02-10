@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { PresetAdvisor } from "./presetAdvisor.js";
 import { CoinMarketCapClient } from "../market/coinmarketcap.js";
+import { PaperBroker } from "./paperBroker.js";
+import { LeadLagPaperStrategy } from "./paperStrategy.js";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function clone(obj) { return JSON.parse(JSON.stringify(obj || {})); }
@@ -19,26 +21,79 @@ const DEFAULT_PRESET = {
 };
 
 export class PaperTestRunner {
-  constructor({ feed, strategy, broker, hub, universe, logger = null } = {}) {
+  constructor({ feed, strategy, broker, hub, universe, logger = null, leadLag = null, rest = null } = {}) {
     this.feed = feed;
     this.strategy = strategy;
     this.broker = broker;
     this.hub = hub;
     this.universe = universe;
     this.logger = logger;
+    this.leadLag = leadLag;
 
     this.running = false;
     this.stopRequested = false;
     this.advisor = new PresetAdvisor();
-    this.cmc = new CoinMarketCapClient({ logger: this.logger });
+    this.cmc = new CoinMarketCapClient({ logger: this.logger, bybitRest: rest });
     this.status = { running: false, runId: null, startedAt: null, endsAt: null, note: "Idle", presets: [], presetsByHour: [], topPairs: [], learning: this.advisor.getLearningPayload(), state: "STOPPED" };
     this.resultsDir = path.join(process.cwd(), "results");
     this.latestPath = path.join(this.resultsDir, "latest.json");
     this.lastKnownTradeCount = 0;
+    this.instances = new Map();
+    this.lastNoTradeAt = Date.now();
+    this.lastWaitLogAt = 0;
     fs.mkdirSync(this.resultsDir, { recursive: true });
   }
 
   getStatus() { return clone(this.status); }
+
+  _allTrades() {
+    if (this.instances.size) {
+      return Array.from(this.instances.values()).flatMap((x) => x.broker.trades || []);
+    }
+    return this.broker.trades || [];
+  }
+
+  _allBrokers() {
+    if (this.instances.size) return Array.from(this.instances.values()).map((x) => x.broker);
+    return [this.broker];
+  }
+
+  _aggregateSummary() {
+    const brokers = this._allBrokers();
+    if (!brokers.length) return this.broker.getSummary();
+    if (brokers.length === 1) return brokers[0].getSummary();
+
+    const summaries = brokers.map((b) => b.getSummary());
+    const first = summaries[0];
+    const sum = (key) => summaries.reduce((acc, s) => acc + Number(s[key] || 0), 0);
+    const trades = sum("trades");
+    const wins = sum("wins");
+    const losses = sum("losses");
+    return {
+      runId: first.runId,
+      startedAt: Math.min(...summaries.map((s) => Number(s.startedAt || Date.now()))),
+      endsAt: Math.max(...summaries.map((s) => Number(s.endsAt || Date.now()))),
+      durationSec: Math.max(...summaries.map((s) => Number(s.durationSec || 0))),
+      startingBalanceUSDT: sum("startingBalanceUSDT"),
+      equityUSDT: sum("equityUSDT"),
+      trades,
+      wins,
+      losses,
+      winRate: trades ? wins / trades : 0,
+      grossPnlUSDT: sum("grossPnlUSDT"),
+      feesUSDT: sum("feesUSDT"),
+      slippageUSDT: sum("slippageUSDT"),
+      netPnlUSDT: sum("netPnlUSDT"),
+      netPnlBps: first.startingBalanceUSDT > 0 ? (sum("netPnlUSDT") * 10000) / sum("startingBalanceUSDT") : 0,
+      profitFactor: 0,
+      maxDrawdownUSDT: sum("maxDrawdownUSDT"),
+      avgHoldSec: trades ? sum("avgHoldSec") / summaries.length : 0,
+      avgR: trades ? sum("avgR") / summaries.length : 0,
+      notes: "Multi strategy",
+      tradesPreview: this._allTrades().slice(0, 30),
+      perPreset: Object.fromEntries(Array.from(this.instances.entries()).map(([name, x]) => [name, x.broker.getSummary()])),
+    };
+  }
 
   resetLearning() {
     this.advisor.reset();
@@ -50,22 +105,20 @@ export class PaperTestRunner {
 
   _buildTopPairs() {
     const m = new Map();
-    for (const t of this.broker.trades || []) {
+    for (const t of this._allTrades()) {
       const pair = t.meta?.leader && t.meta?.follower ? `${t.meta.leader}->${t.meta.follower}` : (t.symbol || "-");
-      const key = pair;
-      const cur = m.get(key) || { pair, symbol: t.symbol || pair, tradesCount: 0, netPnlUSDT: 0 };
+      const cur = m.get(pair) || { pair, symbol: t.symbol || pair, tradesCount: 0, netPnlUSDT: 0 };
       cur.tradesCount += 1;
       cur.netPnlUSDT += Number(t.pnlUSDT || 0);
-      m.set(key, cur);
+      m.set(pair, cur);
     }
     return [...m.values()].sort((a, b) => b.netPnlUSDT - a.netPnlUSDT).slice(0, 50);
   }
 
   _deriveRuntimeState() {
-    if (!this.running) return "STOPPED";
-    if (this.broker.position) return "RUNNING_IN_TRADE";
-    const recentTrade = this.broker.trades?.[0];
-    if (recentTrade && (Date.now() - Number(recentTrade.ts || 0)) < 30_000) return "RUNNING_IN_TRADE";
+    if (!this.running || this.stopRequested) return "STOPPED";
+    const hasPos = this._allBrokers().some((b) => !!b.position);
+    if (hasPos) return "RUNNING_IN_TRADE";
     return "RUNNING_WAITING";
   }
 
@@ -77,7 +130,7 @@ export class PaperTestRunner {
       runId: this.status.runId,
       startedAt: this.status.startedAt,
       endsAt: this.status.endsAt,
-      summary: this.broker.getSummary(),
+      summary: this._aggregateSummary(),
       presetsByHour: this.status.presetsByHour || [],
       topPairs: this._buildTopPairs(),
       learning: this.advisor.getLearningPayload(),
@@ -86,6 +139,9 @@ export class PaperTestRunner {
       presets: this.status.presets || [],
       activePresetName: this.status.currentPreset?.name || null,
       selectedSymbols: this.status.symbols || [],
+      trades: this._allTrades().slice(0, 200),
+      runningSettingsHash: this.advisor.runningSettingsHash,
+      settingsHash: this.advisor.lastSettingsHash,
     };
   }
 
@@ -95,71 +151,55 @@ export class PaperTestRunner {
 
   _broadcast() {
     try {
-      const payload = this.getStatus();
-      payload.state = this._deriveRuntimeState();
-      payload.learning = this.advisor.getLearningPayload();
+      const payload = this._latestPayload(this.status.note || "Running");
       this.hub.broadcast("paperTest", payload);
     } catch {}
   }
 
-  _applyPatchToPreset(presets, patch) {
-    const idx = presets.findIndex((p) => p.name === patch?.presetName);
-    if (idx < 0) return { presets, logs: [] };
-    const before = presets[idx];
-    const next = { ...before, ...patch.changes };
-    const logs = [];
-    for (const [k, v] of Object.entries(patch.changes || {})) {
-      logs.push(`Автотюнинг применён: preset=${patch.presetName} ${k}: ${before[k]}→${v}`);
-    }
-    const out = [...presets];
-    out[idx] = next;
-    return { presets: out, logs };
-  }
-
   async _pickSymbols({ symbolsCount, minMarketCapUsd }) {
-    const requestedCount = Math.max(1, Number(symbolsCount) || 30);
-    const candidates = await this.universe.getTopUSDTPerps({ count: Math.max(60, requestedCount * 3), minMarketCapUsd });
-    const byBase = [];
-    for (const sym of candidates || []) {
-      const s = String(sym || "").toUpperCase();
-      if (!s.endsWith("USDT")) continue;
-      const base = s.slice(0, -4);
-      byBase.push({ symbol: s, base, sourceIndex: byBase.length });
-    }
-
-    let capMap = null;
-    try {
-      capMap = await this.cmc.getMarketCapsMap({ limit: 200 });
-    } catch (e) {
-      this.logger?.log("paper_test_cmc_fallback", { error: String(e?.message || e) });
-    }
-
-    let filtered = byBase;
-    if (capMap) {
-      filtered = byBase
-        .map((item) => ({ ...item, marketCapUsd: Number(capMap.get(item.base)) }))
-        .filter((item) => Number.isFinite(item.marketCapUsd) && item.marketCapUsd >= minMarketCapUsd)
-        .sort((a, b) => (b.marketCapUsd - a.marketCapUsd) || (a.sourceIndex - b.sourceIndex));
-    }
-
-    const picked = filtered.slice(0, requestedCount).map((x) => x.symbol);
+    const requestedCount = Math.max(1, Number(symbolsCount) || 100);
+    const picked = await this.cmc.getUniverseFromRating({ limit: requestedCount, minMarketCapUsd, listingsLimit: 500 });
     const examples = picked.slice(0, 8);
-    this.logger?.log("paper_test_universe", { requestedCount, minMarketCapUsd, picked: picked.length, examples, usedCapFilter: !!capMap });
     this.advisor.logEvent("universe", `Universe: picked ${picked.length} symbols (cap>${(minMarketCapUsd / 1_000_000).toFixed(0)}M), examples: ${examples.join(", ") || "-"}.`);
-
     if (picked.length >= requestedCount) return picked;
 
-    const fallback = Array.from(new Set([...picked, ...byBase.map((x) => x.symbol)])).slice(0, requestedCount);
-    if (fallback.length !== picked.length) {
-      this.advisor.logEvent("universe", `Universe fallback used: доступно ${picked.length} с cap-фильтром, расширено до ${fallback.length}.`);
-    }
-    return fallback;
+    const fallback = await this.universe.getTopUSDTPerps({ count: requestedCount, minMarketCapUsd });
+    const merged = Array.from(new Set([...picked, ...fallback])).slice(0, requestedCount);
+    this.advisor.logEvent("universe", `Universe fallback used: доступно ${picked.length}, расширено до ${merged.length}.`);
+    return merged;
   }
 
-  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 30, minMarketCapUsd = 10_000_000, presets = null, autoTune = true } = {}) {
+  _collectRejectReasons() {
+    const counters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
+    let status = "Сканирую пары…";
+    for (const it of this.instances.values()) {
+      const rs = it.strategy?.consumeRejectStats?.() || {};
+      for (const [k, v] of Object.entries(rs.counters || {})) counters[k] += Number(v || 0);
+      if (rs.runtimeStatus) status = rs.runtimeStatus;
+    }
+    if (!this.instances.size) {
+      const rs = this.strategy?.consumeRejectStats?.() || {};
+      for (const [k, v] of Object.entries(rs.counters || {})) counters[k] += Number(v || 0);
+      if (rs.runtimeStatus) status = rs.runtimeStatus;
+    }
+    return { counters, status };
+  }
+
+  _emitWaitLog() {
+    const now = Date.now();
+    if ((now - this.lastWaitLogAt) < 10_000) return;
+    if ((now - this.lastNoTradeAt) < 10_000) return;
+    const { counters, status } = this._collectRejectReasons();
+    const parts = Object.entries(counters).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${k} (x${v})`);
+    this.advisor.logEvent("wait", `WAIT: нет входа. Основная причина: ${parts.join(", ") || "данные копятся"}. ${status}`);
+    this.lastWaitLogAt = now;
+  }
+
+  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 100, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, multiStrategy = false, exploitBest = false, isolatedPresetName = null } = {}) {
     if (this.running) return this.getStatus();
     this.running = true;
     this.stopRequested = false;
+    this.instances.clear();
 
     const runId = `paper-${Date.now()}`;
     const startedAt = Date.now();
@@ -169,30 +209,46 @@ export class PaperTestRunner {
     const steps = Math.max(1, Math.ceil(totalMs / stepMs));
     let usePresets = Array.isArray(presets) && presets.length ? clone(presets) : [clone(DEFAULT_PRESET)];
 
-    this.advisor.logEvent("start", "Тест запущен.");
+    if (!multiStrategy && isolatedPresetName) {
+      const one = usePresets.find((p) => p.name === isolatedPresetName);
+      usePresets = one ? [one] : [usePresets[0]];
+    }
+
     this.advisor.updateOnStart(usePresets);
 
     let symbols;
     try {
       symbols = await this._pickSymbols({ symbolsCount, minMarketCapUsd: Number(minMarketCapUsd) || 10_000_000 });
-    } catch (e) {
+    } catch {
       symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"].slice(0, Math.max(1, Number(symbolsCount) || 5));
-      this.logger?.log("paper_test_universe_fallback", { error: String(e?.message || e), symbols });
-      this.advisor.logEvent("universe", `Universe fallback: picked ${symbols.length} symbols.`);
     }
-    this.feed.setSymbols(symbols.slice(0, 30));
+    this.feed.setSymbols(symbols.slice(0, 100));
     if (!this.feed.running) this.feed.start();
 
     this.broker.reset();
-    this.lastKnownTradeCount = 0;
-    this.strategy.enable(true);
+    this.strategy.enable(false);
+
+    if (multiStrategy) {
+      for (const preset of usePresets) {
+        const broker = new PaperBroker({ logger: this.logger });
+        const strategy = new LeadLagPaperStrategy({ feed: this.feed, leadLag: this.leadLag, broker, hub: this.hub, logger: this.logger });
+        strategy.setParams({ ...preset, enabled: true, name: preset.name });
+        strategy.enable(true);
+        strategy.start();
+        this.instances.set(preset.name, { broker, strategy, preset });
+      }
+    } else {
+      this.instances.clear();
+      this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name });
+      this.strategy.enable(true);
+    }
 
     this.status = {
       running: true,
       runId,
       startedAt,
       endsAt: null,
-      symbols: symbols.slice(0, 30),
+      symbols: symbols.slice(0, 100),
       presets: usePresets,
       currentPreset: usePresets[0],
       presetsByHour: [],
@@ -202,7 +258,11 @@ export class PaperTestRunner {
       state: "RUNNING_WAITING",
       exploitMode: false,
       activePresets: usePresets.map((p) => p.name),
+      multiStrategy: !!multiStrategy,
     };
+    this.advisor.markRunningSettingsHash(usePresets);
+    this.lastNoTradeAt = Date.now();
+    this.lastWaitLogAt = 0;
     this._writeLatest("Running");
     this._broadcast();
 
@@ -212,33 +272,23 @@ export class PaperTestRunner {
         for (let i = 0; i < steps; i++) {
           if (this.stopRequested) break;
 
-          if (!selectedBest && this.advisor.shouldExploitBestPreset({ minTrades: 30, minSegments: 6 })) {
-            selectedBest = this.advisor.bestPresetName;
-            const bestPreset = usePresets.find((p) => p.name === selectedBest);
-            if (bestPreset) {
-              usePresets = [bestPreset];
-              this.status.exploitMode = true;
-              this.status.activePresets = [bestPreset.name];
-              this.advisor.logEvent("exploit", `Достаточно данных, выбран лучший пресет: ${bestPreset.name}. Переходим к использованию только его.`);
-            }
+          if (!multiStrategy) {
+            const preset = usePresets[i % usePresets.length];
+            this.status.currentPreset = preset;
+            this.strategy.setParams({ ...preset, enabled: true, name: preset.name });
           }
 
-          const preset = usePresets[i % usePresets.length];
-          this.status.currentPreset = preset;
-          this.status.presets = usePresets;
-
-          const before = this.broker.getSummary();
-          this.strategy.setParams({ ...preset, enabled: true });
+          const before = this._aggregateSummary();
           const t0 = Date.now();
           while (Date.now() - t0 < stepMs) {
             if (this.stopRequested) break;
-            const state = this._deriveRuntimeState();
-            this.status.state = state;
-            this.advisor.setState(state);
+            this.status.state = this._deriveRuntimeState();
+            this._emitWaitLog();
             this._writeLatest("Running");
             await sleep(1000);
           }
-          const after = this.broker.getSummary();
+
+          const after = this._aggregateSummary();
           const segmentStats = {
             trades: (after.trades || 0) - (before.trades || 0),
             wins: (after.wins || 0) - (before.wins || 0),
@@ -247,48 +297,28 @@ export class PaperTestRunner {
             feesUSDT: (after.feesUSDT || 0) - (before.feesUSDT || 0),
             slippageUSDT: (after.slippageUSDT || 0) - (before.slippageUSDT || 0),
           };
+          if (segmentStats.trades === 0) this.advisor.logEvent("segment", `INFO: Segment ${i + 1} завершён без сделок.`);
+          else this.lastNoTradeAt = Date.now();
 
-          for (let idx = this.lastKnownTradeCount; idx < (this.broker.trades || []).length; idx++) {
-            const ts = this.broker.trades[idx]?.ts;
-            this.advisor.recordTrade(ts);
-          }
-          this.lastKnownTradeCount = (this.broker.trades || []).length;
-
-          this.status.presetsByHour.push({
-            hour: i + 1,
-            segment: i + 1,
-            preset: preset.name || `preset-${i + 1}`,
-            ...segmentStats,
-            winRate: segmentStats.trades ? segmentStats.wins / segmentStats.trades : 0,
-          });
-
-          const advice = this.advisor.updateOnSegment(preset, segmentStats, i + 1);
+          const presetName = this.status.currentPreset?.name || (usePresets[0]?.name || "preset");
+          this.status.presetsByHour.push({ hour: i + 1, segment: i + 1, preset: presetName, ...segmentStats, winRate: segmentStats.trades ? segmentStats.wins / segmentStats.trades : 0 });
+          const advice = this.advisor.updateOnSegment({ name: presetName }, segmentStats, i + 1);
 
           if (advice?.proposedPatch && Object.keys(advice.proposedPatch?.changes || {}).length) {
-            const minSegmentGap = 3;
-            const presetName = advice.proposedPatch.presetName;
-            const tradesEnough = segmentStats.trades >= 10;
-            const canTuneNow = this.advisor.canAutoTune({ presetName, currentSegment: i + 1, minSegmentGap });
-
-            if (autoTune && tradesEnough && canTuneNow) {
-              const patchRes = this._applyPatchToPreset(usePresets, advice.proposedPatch);
-              usePresets = patchRes.presets;
-              this.status.presets = usePresets;
-              for (const line of patchRes.logs) this.advisor.logEvent("auto-tune", line);
-              this.advisor.markAutoTuneApplied({ presetName, segment: i + 1 });
-            } else {
-              let reason = "unknown";
-              if (!autoTune) reason = "autoTune=false";
-              else if (!tradesEnough) reason = `trades<10 (trades=${segmentStats.trades})`;
-              else if (!canTuneNow) {
-                const lastSegment = Number(this.advisor.lastTuneSegmentByPreset.get(presetName) || 0);
-                const waitSegments = Math.max(0, minSegmentGap - ((i + 1) - lastSegment));
-                reason = `minSegmentGap not met (ожидаем ещё ${waitSegments} сегм.)`;
-              }
-              this.advisor.logEvent("auto-tune", `Автотюнинг пропущен: причина=${reason} preset=${presetName}`);
-            }
+            if (!autoTune) this.advisor.logEvent("auto-tune", `AUTO-TUNE пропущен: autoTune=false preset=${presetName}`);
           } else {
-            this.advisor.logEvent("auto-tune", `Автотюнинг пропущен: причина=proposedPatch отсутствует/пустой preset=${preset.name || "preset"}`);
+            this.advisor.logEvent("auto-tune", `AUTO-TUNE пропущен: нет предложений (мало данных/нет статистики/не выполнены условия) preset=${presetName}`);
+          }
+
+          if (exploitBest && !selectedBest && this.advisor.shouldExploitBestPreset({ minTrades: 30, minSegments: 6 })) {
+            selectedBest = this.advisor.bestPresetName;
+            const best = usePresets.find((p) => p.name === selectedBest);
+            if (best && !multiStrategy) {
+              usePresets = [best];
+              this.status.exploitMode = true;
+              this.status.activePresets = [best.name];
+              this.advisor.logEvent("exploit", `Выбран лучший пресет: ${best.name}.`);
+            }
           }
 
           this.status.learning = this.advisor.getLearningPayload();
@@ -298,9 +328,10 @@ export class PaperTestRunner {
           this._broadcast();
         }
       } catch (e) {
-        this.logger?.log("paper_test_run_err", { error: String(e?.message || e) });
         this.status.note = `Ошибка: ${String(e?.message || e)}`;
       } finally {
+        for (const it of this.instances.values()) it.strategy.stop();
+        this.instances.clear();
         this.running = false;
         this.status.running = false;
         this.status.endsAt = Date.now();

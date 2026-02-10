@@ -34,8 +34,8 @@ export function ChartCard({ selectedSymbol, chartBars, onSelectSymbol, symbols }
         </div>
       </div>
 
-      <div style={{ marginTop: 10, width: "100%", overflowX: "auto" }}>
-        <svg width={w} height={h} style={{ display: "block", background: "#fff", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 10 }}>
+      <div style={{ marginTop: 10, width: "100%" }}>
+        <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none" style={{ display: "block", background: "#fff", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 10 }}>
           <polyline fill="none" stroke="#111827" strokeWidth="2" points={pts} />
         </svg>
       </div>

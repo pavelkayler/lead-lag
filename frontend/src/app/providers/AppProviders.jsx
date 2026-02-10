@@ -92,7 +92,7 @@ export function AppProviders({ children }) {
       return res;
     } catch (e) {
       console.error(`[ACTION] ${name} error`, e);
-      setUiError(e.message || "Ошибка");
+      setUiError((prev) => (prev === (e.message || "Ошибка") ? prev : (e.message || "Ошибка")));
       throw e;
     }
   }, []);

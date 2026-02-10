@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Col, Form, Row, Table } from "react-bootstrap";
 import { useApp } from "../../app/providers/AppProviders";
 
-const TOPICS = ["price", "leadlag", "metrics"];
+const TOPICS = ["price", "leadlag", "metrics", "feedStatus"];
 
 export function DashboardPage() {
   const app = useApp();
@@ -18,6 +18,8 @@ export function DashboardPage() {
 
   const rows = useMemo(() => Object.values(app.prices || {}).sort((a, b) => String(a.symbol || "").localeCompare(String(b.symbol || ""))), [app.prices]);
   const top = useMemo(() => [...(app.leadlag || [])].slice(0, 10), [app.leadlag]);
+  const bnHealth = app.metrics?.feed?.binance || app.feedStatus?.binance || null;
+  const bnState = bnHealth?.status || (bnHealth?.wsUp ? "OK" : "DOWN");
 
   const onToggleSub = async (topic, checked) => {
     setSubs((prev) => ({ ...prev, [topic]: checked }));
@@ -39,7 +41,7 @@ export function DashboardPage() {
       <div className="d-flex gap-2 flex-wrap"><Form.Control value={symbolsText} onChange={(e) => { setSymbolsText(e.target.value); }} /><Button onClick={() => onApplySymbols().catch(() => {})}>Применить</Button><Button variant="outline-primary" onClick={() => app.sendCommand("getSymbolsFromRating", { limit: 100, minCapUsd: 10_000_000 }).then((res) => setSymbolsText((res?.symbols || []).join(","))).catch(() => {})}>Из рейтинга</Button><Button onClick={app.startFeed}>Старт фид</Button><Button variant="outline-danger" onClick={app.stopFeed}>Стоп фид</Button></div>
       <div className="mt-2 d-flex gap-3 flex-wrap">{TOPICS.map((t) => <Form.Check key={t} type="checkbox" label={t} checked={!!subs[t]} onChange={(e) => onToggleSub(t, e.target.checked)} />)}</div>
     </Card></Col>
-    <Col lg={6}><Card body><h6>Цены</h6><div style={{ maxHeight: 320, overflowY: "auto" }}><Table size="sm"><thead><tr><th>Symbol</th><th>Bybit</th><th>Binance</th></tr></thead><tbody>{rows.map((r) => <tr key={r.symbol}><td>{r.symbol}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{r.BT ? `${Number(r.BT.mid || 0).toFixed(6)} (BT)` : "-"}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{r.BNB ? `${Number(r.BNB.mid || 0).toFixed(6)} (BNB)` : "-"}</td></tr>)}</tbody></Table></div></Card></Col>
+    <Col lg={6}><Card body><h6>Цены</h6><div className="small text-muted mb-1">Binance WS: <b>{bnState}</b>{bnHealth?.lastMsgAgeMs != null ? ` • age=${bnHealth.lastMsgAgeMs}ms` : ""}{bnHealth?.lastError ? ` • ${bnHealth.lastError}` : ""}</div><div style={{ maxHeight: 320, overflowY: "auto" }}><Table size="sm"><thead><tr><th>Symbol</th><th>Bybit</th><th>Binance</th></tr></thead><tbody>{rows.map((r) => <tr key={r.symbol}><td>{r.symbol}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{r.BT ? `${Number(r.BT.mid || 0).toFixed(6)} (BT)` : "-"}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{r.BNB ? `${Number(r.BNB.mid || 0).toFixed(6)} (BNB)` : <span title="нет данных Binance">нет данных BNB</span>}</td></tr>)}</tbody></Table></div></Card></Col>
     <Col lg={6}><Card body><h6>Лид-лаг (TOP-10)</h6><Table size="sm"><thead><tr><th>Лидер</th><th>Фолловер</th><th>Корреляция</th><th>Lag (Δt)</th><th>Подтверждение</th></tr></thead><tbody>{top.map((r, i) => <tr key={i}><td>{r.leaderDisplay || r.leader}</td><td>{r.followerDisplay || r.follower}</td><td style={{ fontVariantNumeric: "tabular-nums" }}>{Number(r.corr || 0).toFixed(3)}</td><td className="text-nowrap" style={{ fontVariantNumeric: "tabular-nums" }}>{Number(r.lagMs || 0)} ms</td><td><b>{r.confirmLabel || "NO_DATA"}</b></td></tr>)}</tbody></Table></Card></Col>
   </Row>;
 }

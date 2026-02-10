@@ -124,7 +124,7 @@ export function computeLeadLagPairs({
       }
 
       if (best.corr == null || best.corr < minCorr) continue;
-      if (!Number.isFinite(best.samples) || best.samples < minSamples) continue;
+      const insufficientSamples = (!Number.isFinite(best.samples) || best.samples < minSamples);
 
       // impulse response (simple): mean follower return at t+bestLag when leader has impulse
       const leaderStd = std(leaderR);
@@ -150,7 +150,7 @@ export function computeLeadLagPairs({
       if (best.samples >= minSamples) confirmScore += 1;
       if (impulses >= minImpulses) confirmScore += 1;
       if (Number.isFinite(followerMeanAfterImpulse) && Math.abs(followerMeanAfterImpulse) >= minFollowerMove) confirmScore += 1;
-      const confirmLabel = confirmScore >= 3 ? "OK" : (confirmScore >= 2 ? "WEAK" : "NO_DATA");
+      const confirmLabel = insufficientSamples ? "INSUFFICIENT_SAMPLES" : (confirmScore >= 3 ? "OK" : (confirmScore >= 2 ? "WEAK" : "NO_DATA"));
 
       pairs.push({
         leader,
@@ -163,11 +163,18 @@ export function computeLeadLagPairs({
         followerMeanAfterImpulse,
         confirmScore,
         confirmLabel,
+        insufficientSamples,
       });
     }
   }
 
-  pairs.sort((a, b) => (b.corr - a.corr));
+  pairs.sort((a, b) => {
+    const aPenalty = a.insufficientSamples ? 1 : 0;
+    const bPenalty = b.insufficientSamples ? 1 : 0;
+    if (aPenalty !== bPenalty) return aPenalty - bPenalty;
+    if ((b.confirmScore || 0) !== (a.confirmScore || 0)) return (b.confirmScore || 0) - (a.confirmScore || 0);
+    return (b.corr || 0) - (a.corr || 0);
+  });
   latest.pairs = pairs.slice(0, topK);
   return latest;
 }

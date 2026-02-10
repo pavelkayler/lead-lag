@@ -1,18 +1,24 @@
 import { styles } from "../../../shared/ui/styles";
 import { fmtNum } from "../../../shared/utils/format";
 
-export function PricesCard({ prices }) {
+export function PricesCard({ prices, feedStatus }) {
   const rows = Object.entries(prices || {});
+  const bn = feedStatus?.binance || null;
+  const bnState = bn?.status || (bn?.wsUp ? "OK" : "DOWN");
+
   return (
     <div style={{ marginTop: 12 }}>
-      <div style={{ fontWeight: 900, marginBottom: 8 }}>Prices (last)</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontWeight: 900 }}>Prices (last)</div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>Binance WS: {bnState}{bn?.lastError ? ` • ${bn.lastError}` : ""}</div>
+      </div>
       <div style={styles.tableWrap}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead style={styles.thead}>
             <tr>
               <th style={styles.th}>Symbol</th>
-              <th style={styles.th}>Mid</th>
-              <th style={styles.th}>Time</th>
+              <th style={styles.th}>Bybit (BT)</th>
+              <th style={styles.th}>Binance (BNB)</th>
             </tr>
           </thead>
           <tbody>
@@ -24,8 +30,8 @@ export function PricesCard({ prices }) {
               rows.map(([sym, p]) => (
                 <tr key={sym} style={styles.tr}>
                   <td style={{ ...styles.td, fontWeight: 800 }}>{sym}</td>
-                  <td style={styles.td}>{fmtNum(p?.mid, 6)}</td>
-                  <td style={styles.td}>{p?.ts ? new Date(p.ts).toLocaleTimeString() : "-"}</td>
+                  <td style={styles.td}>{fmtNum(p?.BT?.mid, 6)}</td>
+                  <td style={styles.td}>{p?.BNB?.mid != null ? fmtNum(p?.BNB?.mid, 6) : "нет данных BNB"}</td>
                 </tr>
               ))
             )}

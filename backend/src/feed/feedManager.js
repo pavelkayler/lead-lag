@@ -17,6 +17,7 @@ export class FeedManager {
 
     this.wsUrl = wsUrl || process.env.BYBIT_PUBLIC_WS_URL || cfg.wsPublicUrl;
     this.binanceWsUrl = process.env.BINANCE_SPOT_WS_URL || "wss://stream.binance.com:9443/ws/!bookTicker";
+    this._binanceWsMode = "bookTickerAll";
 
     // Public REST (no auth) used as a sanity reference for prices (helps detect rare WS scale glitches)
     this.publicHttpBaseUrl = process.env.BYBIT_PUBLIC_HTTP_URL || "https://api.bybit.com";
@@ -50,6 +51,16 @@ export class FeedManager {
     this.lastBnWsMsgRecvTs = null;
     this.lastWsOpenTs = null;
     this.lastWsCloseTs = null;
+    this.lastBnWsOpenTs = null;
+    this.lastBnWsCloseTs = null;
+    this.lastBnWsError = null;
+    this._bnMsgCount = 0;
+    this._bnMsgLastSecTs = Date.now();
+    this._bnMappedSinceOpen = 0;
+    this._bnFiltered = { nonUsdt: 0, notWhitelisted: 0, invalidPayload: 0, invalidNumbers: 0 };
+    this._bnFilterLastLogTs = 0;
+    this._bnFallbackAttempted = false;
+    this._bnDegradeLastLogTs = 0;
 
     this.tickLogSampleMs = Number(process.env.FEED_TICK_LOG_SAMPLE_MS) || 1000;
     this.latWin = Math.max(100, Number(process.env.LATENCY_WINDOW) || 2000);
@@ -120,13 +131,42 @@ export class FeedManager {
       binanceReconnects: this.binanceReconnects,
       lastWsMsgAgeMs: this.lastWsMsgRecvTs ? (now - this.lastWsMsgRecvTs) : null,
       lastBinanceWsMsgAgeMs: this.lastBnWsMsgRecvTs ? (now - this.lastBnWsMsgRecvTs) : null,
+      binance: this.getBinanceHealth(),
       barLatency: this._percentiles(this._barLatency),
       wsDelay: this._percentiles(this._wsDelay),
     };
   }
 
+  getBinanceHealth() {
+    const now = Date.now();
+    const mappedSymbolsCount = this.symbols.reduce((acc, symbol) => {
+      const st = this.state.get(this._seriesKey(symbol, "BNB"));
+      return acc + (Number.isFinite(st?.mid) ? 1 : 0);
+    }, 0);
+    return {
+      wsUp: this.isBinanceWsUp(),
+      wsMode: this._binanceWsMode,
+      wsUrl: this._currentBinanceWsUrl(),
+      lastMsgAgeMs: this.lastBnWsMsgRecvTs ? (now - this.lastBnWsMsgRecvTs) : null,
+      lastError: this.lastBnWsError,
+      reconnects: this.binanceReconnects,
+      subscribedSymbolsCount: this.symbols.length,
+      mappedSymbolsCount,
+      mappedSinceOpen: this._bnMappedSinceOpen,
+      filtered: { ...this._bnFiltered },
+      status: this._calcBinanceStatus(),
+    };
+  }
+
+  _calcBinanceStatus() {
+    if (!this.isBinanceWsUp()) return "DOWN";
+    const age = this.lastBnWsMsgRecvTs ? (Date.now() - this.lastBnWsMsgRecvTs) : null;
+    if (age == null || age > 10000) return "STALE";
+    return "OK";
+  }
+
   setSymbols(symbols) {
-    const uniq = [...new Set(symbols || [])].slice(0, 300);
+    const uniq = [...new Set((symbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean))].slice(0, 300);
     this.symbols = uniq;
 
     for (const s of uniq) {
@@ -143,6 +183,7 @@ export class FeedManager {
     }
 
     this._syncSubscriptions();
+    this.logger?.log("bn_ws_symbols", { mode: this._binanceWsMode, count: this.symbols.length, preview: this.symbols.slice(0, 10) });
     this.logger?.log("symbols", { symbols: this.symbols });
   }
 
@@ -199,8 +240,8 @@ export class FeedManager {
     return (typeof mid === "number" && Number.isFinite(mid)) ? mid : null;
   }
 
-  getReturns(symbol, n) {
-    const bars = this.getBars(symbol, n);
+  getReturns(symbol, n, source = "BT") {
+    const bars = this.getBars(symbol, n, source);
     const rs = [];
     for (const b of bars) {
       const v = Number(b?.r);
@@ -222,8 +263,7 @@ export class FeedManager {
     const all = [];
     for (const symbol of this.symbols) {
       for (const source of ["BT", "BNB"]) {
-        const st = this.state.get(this._seriesKey(symbol, source));
-        if (!st || !Number.isFinite(st.mid)) continue;
+        this._ensureSeries(symbol, source);
         all.push({ symbol, source, key: this._seriesKey(symbol, source) });
       }
     }
@@ -344,11 +384,22 @@ export class FeedManager {
   _connectBinanceWs() {
     if (!this.running) return;
     if (this._bnWs && (this._bnWs.readyState === WebSocket.OPEN || this._bnWs.readyState === WebSocket.CONNECTING)) return;
-    this._bnWs = new WebSocket(this.binanceWsUrl);
+    const url = this._currentBinanceWsUrl();
+    this._bnWs = new WebSocket(url);
 
     this._bnWs.on("open", () => {
+      this.lastBnWsOpenTs = Date.now();
       this._bnReconnectDelayMs = 500;
-      this.logger?.log("bn_ws_state", { state: "open", url: this.binanceWsUrl });
+      this._bnMsgCount = 0;
+      this._bnMsgLastSecTs = Date.now();
+      this._bnMappedSinceOpen = 0;
+      this._bnFallbackAttempted = false;
+      this.logger?.log("bn_ws_state", { state: "open", url, mode: this._binanceWsMode, symbolsCount: this.symbols.length });
+      this.logger?.log("bn_ws_subscribe", {
+        mode: this._binanceWsMode,
+        listening: this._binanceWsMode === "bookTickerAll" ? "!bookTicker" : "<symbols>@bookTicker",
+        symbolsCount: this.symbols.length,
+      });
       this._bnWsPingTimer = setInterval(() => {
         if (this._bnWs?.readyState === WebSocket.OPEN) {
           try { this._bnWs.ping(); } catch {}
@@ -359,17 +410,45 @@ export class FeedManager {
 
     this._bnWs.on("message", (raw) => {
       this.lastBnWsMsgRecvTs = Date.now();
+      this._bnMsgCount += 1;
+      if ((this.lastBnWsMsgRecvTs - this._bnMsgLastSecTs) >= 1000) {
+        this.logger?.log("bn_ws_rate", { msgsPerSec: this._bnMsgCount, lastMsgTs: this.lastBnWsMsgRecvTs });
+        this._bnMsgCount = 0;
+        this._bnMsgLastSecTs = this.lastBnWsMsgRecvTs;
+      }
       let msg;
-      try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
-      const symbol = String(msg?.s || "").toUpperCase();
-      if (!symbol || !symbol.endsWith("USDT") || !this.symbols.includes(symbol)) return;
-      const bid = Number(msg?.b);
-      const ask = Number(msg?.a);
-      this._applyTicker(`bookTicker.${symbol}`, { symbol, bid1Price: bid, ask1Price: ask }, Number(msg?.E || NaN), "BNB");
+      try { msg = JSON.parse(raw.toString("utf8")); } catch { this._bnFiltered.invalidPayload++; return; }
+      const payload = msg?.data && typeof msg.data === "object" ? msg.data : msg;
+      const symbol = String(payload?.s || "").toUpperCase();
+      if (!symbol) {
+        this._bnFiltered.invalidPayload++;
+        return;
+      }
+      if (!symbol.endsWith("USDT")) {
+        this._bnFiltered.nonUsdt++;
+        this._logBnFilterStats();
+        return;
+      }
+      if (!this.symbols.includes(symbol)) {
+        this._bnFiltered.notWhitelisted++;
+        this._logBnFilterStats();
+        return;
+      }
+      const bid = Number(payload?.b);
+      const ask = Number(payload?.a);
+      if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+        this._bnFiltered.invalidNumbers++;
+        this.logger?.log("bn_ws_invalid_book", { symbol, sample: payload });
+        return;
+      }
+      this._bnMappedSinceOpen += 1;
+      this._applyTicker(`bookTicker.${symbol}`, { symbol, bid1Price: bid, ask1Price: ask }, Number(payload?.E || NaN), "BNB");
     });
 
-    const onDown = (why) => {
-      this.logger?.log("bn_ws_state", { state: "down", why: String(why || ""), url: this.binanceWsUrl });
+    const onDown = (why, extra = {}) => {
+      this.lastBnWsCloseTs = Date.now();
+      this.lastBnWsError = String(why || "");
+      this.logger?.log("bn_ws_state", { state: "down", why: String(why || ""), url, mode: this._binanceWsMode, ...extra });
       this._cleanupBinanceWs();
       if (!this.running) return;
       this.binanceReconnects++;
@@ -383,8 +462,23 @@ export class FeedManager {
       this._bnReconnectTimer.unref?.();
     };
 
-    this._bnWs.on("close", () => onDown("close"));
+    this._bnWs.on("close", (code, reason) => onDown("close", { code, reason: Buffer.isBuffer(reason) ? reason.toString("utf8") : String(reason || "") }));
     this._bnWs.on("error", (e) => onDown(e?.message || "error"));
+  }
+
+  _currentBinanceWsUrl() {
+    if (this._binanceWsMode === "streamWhitelist") {
+      const streams = this.symbols.slice(0, 150).map((s) => `${String(s).toLowerCase()}@bookTicker`);
+      if (streams.length) return `wss://stream.binance.com:9443/stream?streams=${streams.join("/")}`;
+    }
+    return this.binanceWsUrl;
+  }
+
+  _logBnFilterStats(force = false) {
+    const now = Date.now();
+    if (!force && (now - this._bnFilterLastLogTs) < 5000) return;
+    this._bnFilterLastLogTs = now;
+    this.logger?.log("bn_ws_filtered", { ...this._bnFiltered, whitelistCount: this.symbols.length });
   }
 
 
@@ -565,6 +659,28 @@ export class FeedManager {
 
   _onBar() {
     const now = Date.now();
+
+    if (this.running) {
+      const health = this.getBinanceHealth();
+      if (health.wsUp && health.mappedSymbolsCount === 0 && this.lastBnWsOpenTs && (now - this.lastBnWsOpenTs) > 12000) {
+        if ((now - this._bnDegradeLastLogTs) > 5000) {
+          this._bnDegradeLastLogTs = now;
+          this.logger?.log("bn_ws_degraded", { reason: "mappedSymbolsCount=0_after_open", health });
+        }
+        if (!this._bnFallbackAttempted && this._binanceWsMode === "bookTickerAll") {
+          this._bnFallbackAttempted = true;
+          this._binanceWsMode = "streamWhitelist";
+          this.logger?.log("bn_ws_fallback", { from: "!bookTicker", to: "streamWhitelist", symbolsCount: this.symbols.length });
+          this._cleanupBinanceWs();
+          this._connectBinanceWs();
+        }
+      }
+      if (health.lastMsgAgeMs != null && health.lastMsgAgeMs > 10000 && (now - this._bnDegradeLastLogTs) > 5000) {
+        this._bnDegradeLastLogTs = now;
+        this.logger?.log("bn_ws_degraded", { reason: "lastMsgAgeMs_threshold", health });
+      }
+      this.broadcast("feedStatus", { ts: now, bybit: { wsUp: this.isWsUp(), lastMsgAgeMs: this.lastWsMsgRecvTs ? (now - this.lastWsMsgRecvTs) : null, reconnects: this.reconnects }, binance: health });
+    }
 
     for (const s of this.symbols) {
       for (const source of ["BT", "BNB"]) {

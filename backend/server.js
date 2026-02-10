@@ -322,6 +322,8 @@ function startMetricsTicker(ctx, feed, hub, leadLag, priv, trade, risk, paper, s
         wsUrl: fs.wsUrl,
         reconnects: fs.reconnects ?? 0,
         lastWsMsgAgeMs: fs.lastWsMsgAgeMs ?? null,
+        binance: fs.binance || null,
+        bybit: { wsUp: !!fs.wsUp, lastMsgAgeMs: fs.lastWsMsgAgeMs ?? null, reconnects: fs.reconnects ?? 0 },
         barLatencyP50: fs.barLatency?.p50 ?? null,
         barLatencyP90: fs.barLatency?.p90 ?? null,
         barLatencyP99: fs.barLatency?.p99 ?? null,
@@ -415,7 +417,7 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
         subscriptions: Array.from(ctx.subscriptions),
         bufferedBytes: ctx.ws.bufferedAmount,
         env: { name: BYBIT_CFG.env, tradeTransport: BYBIT_CFG.tradeTransport, httpBaseUrl: BYBIT_CFG.httpBaseUrl, wsPublicUrl: BYBIT_CFG.wsPublicUrl, wsPrivateUrl: BYBIT_CFG.wsPrivateUrl, wsTradeUrl: BYBIT_CFG.wsTradeUrl, safety: BYBIT_CFG.safety },
-        feed: { running: !!feed.running, symbols: feed.symbols || [], stats: feed.getStats() },
+        feed: { running: !!feed.running, symbols: feed.symbols || [], stats: feed.getStats(), health: { bybit: { wsUp: feed.isWsUp?.() || false, lastMsgAgeMs: feed.lastWsMsgRecvTs ? (Date.now() - feed.lastWsMsgRecvTs) : null, reconnects: feed.reconnects || 0 }, binance: feed.getBinanceHealth?.() || null } },
         hub: hub.getStats(),
         leadLag: { latestTs: leadLag.latest?.ts ?? null, top: (leadLag.latest?.pairs || []).slice(0, 10) },
         privateWs: priv.getStats(),
@@ -971,9 +973,11 @@ async startPaperTest(payload) {
   const multiStrategy = !!payload?.multiStrategy;
   const exploitBest = !!payload?.exploitBest;
   const isolatedPresetName = payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null;
+  const useBybit = payload?.useBybit !== false;
+  const useBinance = payload?.useBinance !== false;
 
   Promise.resolve().then(async () => {
-    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName });
+    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
     hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   }).catch((e) => {
     logger?.log("paper_test_start_error", { error: String(e?.message || e) });
@@ -1025,7 +1029,12 @@ async listPresets() {
 },
 
 async savePreset(payload = {}) {
-  const preset = paperTest.upsertPreset(payload?.preset || payload);
+  const body = payload?.preset || payload || {};
+  const routeName = String(payload?.name || body?.name || "").trim();
+  const hasName = String(body?.name || "").trim();
+  const preset = (!hasName && routeName)
+    ? paperTest.updatePreset(routeName, body)
+    : paperTest.upsertPreset(body);
   return { preset, presets: paperTest.listPresets() };
 },
 

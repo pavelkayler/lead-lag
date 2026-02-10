@@ -6,7 +6,7 @@ const DEFAULT_WS_URL = "ws://localhost:8080";
 function makeId(type) { return `${type}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`; }
 
 const ROUTE_TOPICS = {
-  "/": ["price", "leadlag", "metrics"],
+  "/": ["price", "leadlag", "metrics", "feedStatus"],
   "/paper": ["paperTest"],
   "/hedge": ["tradeState", "bar"],
   "/demo": ["tradeState", "price"],
@@ -34,6 +34,7 @@ export function AppProviders({ children }) {
   const [prices, setPrices] = useState({});
   const [leadlag, setLeadlag] = useState([]);
   const [metrics, setMetrics] = useState(null);
+  const [feedStatus, setFeedStatus] = useState(null);
   const [bars, setBars] = useState({});
   const [paperTest, setPaperTest] = useState(null);
   const [presets, setPresets] = useState([]);
@@ -102,6 +103,7 @@ export function AppProviders({ children }) {
       }
       if (msg.topic === "leadlag") setLeadlag(msg.payload?.top || []);
       if (msg.topic === "metrics") setMetrics(msg.payload || null);
+      if (msg.topic === "feedStatus") setFeedStatus(msg.payload || null);
       if (msg.topic === "bar") {
         const symbol = String(msg.payload?.symbol || "").toUpperCase();
         const source = String(msg.payload?.source || "BT").toUpperCase();
@@ -190,7 +192,7 @@ export function AppProviders({ children }) {
   });
 
   const listPresets = () => action("listPresets", () => sendCommand("listPresets", {})).then((r) => { setPresets(r.presets || []); setPresetStats(r.presetStats || {}); return r; });
-  const savePreset = (preset) => action("savePreset", () => sendCommand("savePreset", { preset })).then((r) => { setPresets(r.presets || []); return r; });
+  const savePreset = (preset, opts = {}) => action("savePreset", () => sendCommand("savePreset", { preset, name: opts?.name || preset?.name || "" })).then((r) => { setPresets(r.presets || []); return r; });
   const deletePreset = (name) => action("deletePreset", () => sendCommand("deletePreset", { name })).then((r) => { setPresets(r.presets || []); return r; });
 
   const startRangeMetrics = (cfg) => action("startRangeMetrics", () => sendCommand("startRangeMetrics", cfg || {}));
@@ -254,11 +256,11 @@ export function AppProviders({ children }) {
   }, [status, activePath]);
 
   const value = useMemo(() => ({
-    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, setUiError, activePath,
+    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, setUiError, activePath,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
     startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
     startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates,
-  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, activePath, connect, disconnect, sendCommand]);
+  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, activePath, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

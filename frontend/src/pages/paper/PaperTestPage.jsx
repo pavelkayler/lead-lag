@@ -17,6 +17,8 @@ export function PaperTestPage() {
   const [multiStrategy, setMultiStrategy] = useState(true);
   const [exploitBest, setExploitBest] = useState(true);
   const [isolatedPresetName, setIsolatedPresetName] = useState("");
+  const [useBybit, setUseBybit] = useState(true);
+  const [useBinance, setUseBinance] = useState(true);
   const [showToast, setShowToast] = useState(false);
   const [tick, setTick] = useState(0);
 
@@ -49,7 +51,7 @@ export function PaperTestPage() {
   const start = async () => {
     const single = presets.find((p) => p.name === isolatedPresetName);
     const presetsPayload = multiStrategy ? selectedPresets : (single ? [single] : []);
-    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName });
+    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
     if (res?.queued) setShowToast(true);
   };
 
@@ -67,6 +69,7 @@ export function PaperTestPage() {
         <Form.Label className="mb-1">Длительность (часы): {durationHours}</Form.Label><Form.Range min={1} max={24} value={durationHours} onChange={(e) => setDurationHours(Number(e.target.value))} />
         <div className="mb-2"><Form.Check type="checkbox" label="Эксплуатация лучшего" checked={exploitBest} onChange={(e) => setExploitBest(e.target.checked)} /></div>
         <div className="mb-2"><Form.Check type="checkbox" label="Мульти-стратегия (параллельно)" checked={multiStrategy} onChange={(e) => setMultiStrategy(e.target.checked)} /></div>
+        <div className="mb-2 d-flex gap-3 flex-wrap"><Form.Check type="checkbox" label="Use Bybit (BT)" checked={useBybit} onChange={(e) => setUseBybit(e.target.checked)} /><Form.Check type="checkbox" label="Use Binance (BNB)" checked={useBinance} onChange={(e) => setUseBinance(e.target.checked)} /></div>
         <div className="d-flex gap-2 flex-wrap mb-2">{presets.map((p) => <Form.Check key={p.name} type="checkbox" label={p.name} checked={selectedPresetIds.includes(p.name)} onChange={(e) => setSelectedPresetIds((old) => e.target.checked ? [...new Set([...old, p.name])] : old.filter((id) => id !== p.name))} />)}</div>
         <Form.Group className="mb-2"><Form.Label>Тестировать только</Form.Label><Form.Select value={isolatedPresetName} onChange={(e) => setIsolatedPresetName(e.target.value)} style={{ maxWidth: 340 }}>{presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</Form.Select></Form.Group>
         <div className="d-flex gap-2 flex-wrap"><Button onClick={() => start().catch(() => {})}>Запустить тест</Button><Button variant="outline-danger" onClick={() => app.stopPaperTest().catch(() => {})}>Остановить</Button><Button variant="outline-secondary" onClick={() => app.sendCommand("resetLearning", {}).catch(() => {})}>Сбросить историю</Button></div>

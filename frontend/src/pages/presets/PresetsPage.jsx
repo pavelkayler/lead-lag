@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Col, Form, Row, Table } from "react-bootstrap";
 import { useApp } from "../../app/providers/AppProviders";
 
-const EMPTY = { name: "", qtyUSDT: 25, minCorr: 0.15, impulseZ: 2.2, tpSigma: 1.5, slSigma: 1.0, maxHoldBars: 20, cooldownBars: 20, entryStrictness: 65, blacklistSymbols: [], blacklist: [] };
+const EMPTY = { name: "", qtyUSDT: 25, minCorr: 0.15, impulseZ: 2.2, tpSigma: 1.5, slSigma: 1.0, maxHoldBars: 20, cooldownBars: 20, entryStrictness: 65, useFixedLeaders: false, blacklistSymbols: [], blacklist: [] };
 
 export function PresetsPage() {
   const app = useApp();
@@ -18,7 +18,8 @@ export function PresetsPage() {
 
   const save = async () => {
     const blacklist = (draft.blacklist || []).map((x) => ({ ...x, symbol: String(x.symbol || "").toUpperCase() })).filter((x) => x.symbol);
-    await app.savePreset({ ...draft, name: String(draft.name || "").trim(), blacklist, blacklistSymbols: Array.from(new Set(blacklist.map((x) => x.symbol))) });
+    const name = String(draft.name || "").trim();
+    await app.savePreset({ ...draft, name, blacklist, blacklistSymbols: Array.from(new Set(blacklist.map((x) => x.symbol))) }, { name });
     setDraft(EMPTY);
     setExcludeSym("");
   };
@@ -30,8 +31,9 @@ export function PresetsPage() {
     <Col md={5}><Card body><h6>{draft.name ? "Редактирование" : "Создание"}</h6>
       <Form.Group className="mb-2"><Form.Label>Имя</Form.Label><Form.Control value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} /></Form.Group>
       {numericKeys.map((k) => <Form.Group className="mb-2" key={k}><Form.Label>{k}: {draft[k]}</Form.Label><div className="d-flex gap-2"><Form.Range min={k === "entryStrictness" ? 0 : 0} max={k === "entryStrictness" ? 100 : 300} value={draft[k]} onChange={(e) => setDraft((d) => ({ ...d, [k]: Number(e.target.value) }))} /><Form.Control style={{ maxWidth: 120 }} type="number" value={draft[k]} onChange={(e) => setDraft((d) => ({ ...d, [k]: Number(e.target.value) }))} /></div></Form.Group>)}
+      <Form.Check className="mb-2" type="checkbox" label="Фиксированные лидеры BTC/ETH/SOL" checked={!!draft.useFixedLeaders} onChange={(e) => setDraft((d) => ({ ...d, useFixedLeaders: e.target.checked }))} />
       <h6 className="mt-3">Исключения монет</h6>
-      <div className="d-flex gap-2 mb-2"><Form.Control placeholder="Напр. XRPUSDT" value={excludeSym} onChange={(e) => setExcludeSym(e.target.value.toUpperCase())} /><Form.Check label="BT" checked={srcBT} onChange={(e) => setSrcBT(e.target.checked)} /><Form.Check label="BNB" checked={srcBNB} onChange={(e) => setSrcBNB(e.target.checked)} /><Button size="sm" onClick={() => setDraft((d) => { const sources = [srcBT ? "BT" : null, srcBNB ? "BNB" : null].filter(Boolean); const item = { symbol: excludeSym, sources }; const blacklist = [...(d.blacklist || []).filter((x) => x.symbol !== excludeSym), item]; return ({ ...d, blacklist, blacklistSymbols: Array.from(new Set(blacklist.map((x) => x.symbol))) }); })}>Добавить</Button></div>
+      <div className="d-flex gap-2 mb-2"><Form.Control placeholder="Напр. XRPUSDT" value={excludeSym} onChange={(e) => setExcludeSym(e.target.value.toUpperCase())} /><Form.Check label="BT" checked={srcBT} onChange={(e) => setSrcBT(e.target.checked)} /><Form.Check label="BNB" checked={srcBNB} onChange={(e) => setSrcBNB(e.target.checked)} /><Button size="sm" onClick={() => setDraft((d) => { const sym = String(excludeSym || "").toUpperCase().trim(); if (!sym) return d; const sources = [srcBT ? "BT" : null, srcBNB ? "BNB" : null].filter(Boolean); const item = { symbol: sym, sources }; const blacklist = [...(d.blacklist || []).filter((x) => x.symbol !== sym), item]; return ({ ...d, blacklist, blacklistSymbols: Array.from(new Set(blacklist.map((x) => x.symbol))) }); })}>Добавить</Button></div>
       <div className="d-flex gap-2 flex-wrap mb-3">{(draft.blacklist || []).map((b) => <Button key={b.symbol} size="sm" variant="outline-danger" onClick={() => setDraft((d) => ({ ...d, blacklist: (d.blacklist || []).filter((x) => x.symbol !== b.symbol), blacklistSymbols: (d.blacklistSymbols || []).filter((x) => x !== b.symbol) }))}>{b.symbol} [{(b.sources || []).join(",") || "-"}] ✕</Button>)}</div>
       <div className="d-flex gap-2"><Button onClick={() => save().catch(() => {})}>Сохранить</Button><Button variant="outline-secondary" onClick={() => setDraft(EMPTY)}>Сброс</Button></div>
     </Card></Col>

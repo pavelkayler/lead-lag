@@ -27,6 +27,8 @@ export class LeadLagPaperStrategy {
     this.trendMinZ = 0.5;
     this.entryStrictness = 65;
     this.fixedLeaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+    this.useFixedLeaders = false;
+    this.allowedSources = new Set(["BT", "BNB"]);
     this.blacklistSymbols = new Set();
     this.blacklistBySource = new Map();
     this.attemptsBySymbol = new Map();
@@ -64,7 +66,10 @@ export class LeadLagPaperStrategy {
     if (p.trendMinZ != null) this.trendMinZ = Math.max(0, n(p.trendMinZ, this.trendMinZ));
     if (p.entryStrictness != null) this.entryStrictness = Math.min(100, Math.max(0, n(p.entryStrictness, this.entryStrictness)));
     if (p.name != null) this.currentPresetName = String(p.name);
-    if (Array.isArray(p.fixedLeaders)) this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase());
+    if (p.fixedLeaders === null) this.useFixedLeaders = false;
+    if (Array.isArray(p.fixedLeaders)) { this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase()); this.useFixedLeaders = true; }
+    if (p.useFixedLeaders != null) this.useFixedLeaders = !!p.useFixedLeaders;
+    if (Array.isArray(p.allowedSources)) this.allowedSources = new Set(p.allowedSources.map((x) => String(x).toUpperCase()));
     if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
     if (Array.isArray(p.blacklist)) {
       this.blacklistSymbols = new Set();
@@ -102,6 +107,8 @@ export class LeadLagPaperStrategy {
       entryStrictness: this.entryStrictness,
       currentPresetName: this.currentPresetName,
       fixedLeaders: this.fixedLeaders,
+      useFixedLeaders: this.useFixedLeaders,
+      allowedSources: Array.from(this.allowedSources),
       blacklistSymbols: Array.from(this.blacklistSymbols),
       blacklist: Array.from(this.blacklistSymbols).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
     };
@@ -223,11 +230,15 @@ export class LeadLagPaperStrategy {
     if (!this.feed?.running) return;
     if (this.broker.position) return;
 
-    const pairs = (this.leadLag.latest?.pairs || []).slice(0, 10);
+    const pairs = (this.leadLag.latest?.pairs || []).slice(0, 20);
     const top = pairs.find((p) => {
       const leaderBase = this._symbolBase(p.leaderBase || p.leader);
       const followerBase = this._symbolBase(p.followerBase || p.follower);
-      return this.fixedLeaders.includes(String(leaderBase || "").toUpperCase()) && !this.blacklistSymbols.has(String(followerBase || "").toUpperCase());
+      const leaderSource = String(p.leaderSource || "BT").toUpperCase();
+      const followerSource = String(p.followerSource || "BT").toUpperCase();
+      if (!this.allowedSources.has(leaderSource) || !this.allowedSources.has(followerSource)) return false;
+      if (this.useFixedLeaders && !this.fixedLeaders.includes(String(leaderBase || "").toUpperCase())) return false;
+      return !this.blacklistSymbols.has(String(followerBase || "").toUpperCase());
     });
     const topLeader = this._symbolBase(top?.leaderBase || top?.leader);
     const topFollower = this._symbolBase(top?.followerBase || top?.follower);
@@ -236,7 +247,7 @@ export class LeadLagPaperStrategy {
     }
 
     if (this._pendingSetup) {
-      const pendingLeaderBars = this.feed.getBars(this._pendingSetup.leader, 2);
+      const pendingLeaderBars = this.feed.getBars(this._pendingSetup.leader, 2, this._pendingSetup.leaderSource || "BT");
       const pendingLeaderLast = pendingLeaderBars.length ? pendingLeaderBars[pendingLeaderBars.length - 1] : null;
       if (pendingLeaderLast?.t && this._pendingSetup.lastLeaderBarT !== pendingLeaderLast.t) {
         this._pendingSetup.lastLeaderBarT = pendingLeaderLast.t;
@@ -258,6 +269,10 @@ export class LeadLagPaperStrategy {
       this._countReject("noCandidatePairs", "Сканирую пары…");
       return;
     }
+    const leader = this._symbolBase(top.leaderBase || top.leader);
+    const follower = this._symbolBase(top.followerBase || top.follower);
+    const followerSource = String(top.followerSource || "BT").toUpperCase();
+
     const strictFactor = this._strictFactor();
     const effMinCorr = this.minCorr * strictFactor;
     if (top.corr == null || top.corr < effMinCorr) {
@@ -267,11 +282,8 @@ export class LeadLagPaperStrategy {
       return;
     }
 
-    const leader = this._symbolBase(top.leaderBase || top.leader);
-    const follower = this._symbolBase(top.followerBase || top.follower);
-    const followerSource = String(top.followerSource || "BT").toUpperCase();
-
-    const leaderBars = this.feed.getBars(leader, 2);
+    const leaderSource = String(top?.leaderSource || "BT").toUpperCase();
+    const leaderBars = this.feed.getBars(leader, 2, leaderSource);
     if (!leaderBars.length) return;
     const lastBar = leaderBars[leaderBars.length - 1];
     if (!lastBar?.t) return;
@@ -283,7 +295,7 @@ export class LeadLagPaperStrategy {
     const lastR = Number(lastBar?.r);
     if (!Number.isFinite(lastR)) return;
 
-    const leaderR = this.feed.getReturns(leader, this.stdBars);
+    const leaderR = this.feed.getReturns(leader, this.stdBars, leaderSource);
     const leaderVol = PaperBroker.rollingStd(leaderR);
     if (!Number.isFinite(leaderVol) || leaderVol <= 0) return;
 
@@ -297,7 +309,7 @@ export class LeadLagPaperStrategy {
 
     if (!this._pendingSetup) {
       const side = lastR >= 0 ? "Buy" : "Sell";
-      const followerR = this.feed.getReturns(follower, this.stdBars);
+      const followerR = this.feed.getReturns(follower, this.stdBars, followerSource);
       const followerVol = PaperBroker.rollingStd(followerR);
       if (!Number.isFinite(followerVol) || followerVol <= 0) return;
 
@@ -323,6 +335,8 @@ export class LeadLagPaperStrategy {
         bestLagBars: top.bestLagBars,
         bestLagMs: top.bestLagMs,
         leaderR: lastR,
+        leaderSource,
+        followerSource,
         leaderThr: thr,
         leaderVol,
         followerVol,

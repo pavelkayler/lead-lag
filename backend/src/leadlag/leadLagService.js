@@ -27,6 +27,8 @@ export class LeadLagService {
       follower: followerDisplay,
       leaderBase,
       followerBase,
+      leaderBaseSymbol: leaderBase,
+      followerBaseSymbol: followerBase,
       leaderSource,
       followerSource,
       leaderDisplay,
@@ -39,6 +41,7 @@ export class LeadLagService {
       samples: typeof p?.samples === "number" ? p.samples : null,
       confirmScore: typeof p?.confirmScore === "number" ? p.confirmScore : null,
       confirmLabel: p?.confirmLabel || "NO_DATA",
+      correlationLabel: "Корреляция",
     };
     });
 
@@ -81,8 +84,9 @@ export class LeadLagService {
     this._timer = null;
   }
 
-  computeNow({ topK = 15 } = {}) {
-    const series = Array.isArray(this.feed.listSeries?.()) ? this.feed.listSeries() : [];
+  computeNow({ topK = 15, sources = ["BT", "BNB"] } = {}) {
+    const allowedSources = new Set((Array.isArray(sources) ? sources : ["BT", "BNB"]).map((x) => String(x).toUpperCase()));
+    const series = (Array.isArray(this.feed.listSeries?.()) ? this.feed.listSeries() : []).filter((x) => allowedSources.has(String(x?.source || "").toUpperCase()));
     const returnsBySymbol = {};
 
     for (const x of series) {

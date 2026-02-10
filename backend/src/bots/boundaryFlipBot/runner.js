@@ -71,11 +71,8 @@ export class BoundaryFlipBotRunner {
     if (!ev?.action) return;
     if (ev.action === "position_opened") {
       const p = this.cycle.position;
-      const template = this.cycle.openOrders.find((x) => x.entryPrice === p.entryPrice) || this.cycle.openOrders[0];
-      p.tpPrice = template?.tpPrice;
-      p.slPrice = template?.slPrice;
       this.status.position = p;
-      this._log("info", "Позиция открыта", { cycleId: this.cycle.id, entry: p.entryPrice });
+      this._log("info", "Позиция открыта", { cycleId: this.cycle.id, avgEntry: p.avgEntry, qty: p.qty });
       this._emit("status", this.getStatus());
       return;
     }
@@ -83,6 +80,14 @@ export class BoundaryFlipBotRunner {
       const p = this.cycle.position;
       await this.executor.closePosition({ mode: this.config.mode, symbol: this.config.symbol, side: p.side, qty: p.qty });
       await this.executor.cancelAllEntries({ mode: this.config.mode, symbol: this.config.symbol });
+      if (ev.reason === "EARLY" && ev.earlyMeta) {
+        const m = ev.earlyMeta;
+        this._log(
+          "info",
+          `[EARLY] close near TP: roi=${Number(ev.pnlPct || 0).toFixed(3)}%, tp=${m.tpPrice}, nearStart=${m.nearStartPrice}, peak=${m.peakPrice}, pullback=${m.pullbackPctFromPeak}%, candleBodyPct=${m.candleBodyPct}, bodyToRange=${m.bodyToRange}`,
+          { cycleId: this.cycle.id, ...m },
+        );
+      }
       this.status.lastCycleReason = ev.reason;
       this._emit("cycle", { event: "cycleEnded", cycleId: this.cycle.id, reason: ev.reason });
       const next = this.cycle.side === "SHORT" ? "LONG" : "SHORT";

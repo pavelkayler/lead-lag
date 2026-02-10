@@ -57,7 +57,7 @@ export class PaperBroker {
     if (this.equityPoints.length > 10_000) this.equityPoints.shift();
   }
 
-  open({ symbol, side, entryMid, qtyUSDT, tpR, slR, maxHoldBars = 20, meta = {} }) {
+  open({ symbol, side, entryMid, qtyUSDT, tpR, tpR1, tpR2, slR, maxHoldBars = 20, meta = {} }) {
     if (this.position) throw new Error("paper: позиция уже открыта");
     if (!symbol) throw new Error("paper: symbol required");
     if (side !== "Buy" && side !== "Sell") throw new Error("paper: side must be Buy|Sell");
@@ -84,8 +84,12 @@ export class PaperBroker {
       entryTs: Date.now(),
       holdBars: 0,
       maxHoldBars: Math.max(1, Number(maxHoldBars) || 1),
-      tpR: Math.max(0, Number(tpR) || 0),
+      tpR: Math.max(0, Number(tpR2 ?? tpR) || 0),
+      tpR1: Math.max(0, Number(tpR1) || 0),
+      tpR2: Math.max(0, Number(tpR2 ?? tpR) || 0),
       slR: Math.max(0, Number(slR) || 0),
+      tp1Hit: false,
+      stopAtEntry: false,
       meta,
       feesUSDT: feeIn,
       slippageUSDT: slipIn,
@@ -114,14 +118,18 @@ export class PaperBroker {
     const pos = this.position;
     const r = Math.log(m / pos.entryMid);
     const shouldExitByTime = pos.holdBars >= pos.maxHoldBars;
+    const heldMs = this.lastUpdateTs - pos.entryTs;
 
     let exitReason = null;
+    if (pos.stopAtEntry && heldMs >= 250) {
+      if ((pos.side === "Buy" && r <= 0) || (pos.side === "Sell" && r >= 0)) exitReason = "be";
+    }
     if (pos.side === "Buy") {
-      if (pos.tpR > 0 && r >= pos.tpR) exitReason = "tp";
-      else if (pos.slR > 0 && r <= -pos.slR) exitReason = "sl";
+      if (!exitReason && pos.tpR > 0 && r >= pos.tpR) exitReason = "tp";
+      else if (!exitReason && pos.slR > 0 && r <= -pos.slR) exitReason = "sl";
     } else {
-      if (pos.tpR > 0 && r <= -pos.tpR) exitReason = "tp";
-      else if (pos.slR > 0 && r >= pos.slR) exitReason = "sl";
+      if (!exitReason && pos.tpR > 0 && r <= -pos.tpR) exitReason = "tp";
+      else if (!exitReason && pos.slR > 0 && r >= pos.slR) exitReason = "sl";
     }
     if (!exitReason && shouldExitByTime) exitReason = "time";
     if (exitReason) return this.close(m, exitReason);
@@ -178,7 +186,11 @@ export class PaperBroker {
       reason,
       holdBars: pos.holdBars,
       tpR: pos.tpR,
+      tpR1: pos.tpR1,
+      tpR2: pos.tpR2,
       slR: pos.slR,
+      tp1Hit: !!pos.tp1Hit,
+      stopAtEntry: !!pos.stopAtEntry,
       riskUSDT: Math.max(1e-9, pos.qtyUSDT * (pos.slR || 0)),
       rMultiple: (pos.slR > 0) ? netPnl / (pos.qtyUSDT * pos.slR) : 0,
       meta: pos.meta,

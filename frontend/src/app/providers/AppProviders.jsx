@@ -20,6 +20,8 @@ export function AppProviders({ children }) {
   const [metrics, setMetrics] = useState(null);
   const [bars, setBars] = useState({});
   const [paperTest, setPaperTest] = useState(null);
+  const [presets, setPresets] = useState([]);
+  const [presetStats, setPresetStats] = useState({});
   const [tradeState, setTradeState] = useState(null);
   const [tradingStatus, setTradingStatus] = useState({ trading: false, mode: "demo" });
   const [uiError, setUiError] = useState("");
@@ -50,6 +52,7 @@ export function AppProviders({ children }) {
         const st = await sendCommand("getStatus", {});
         setFeedMaxSymbols(st.feedMaxSymbols || 100);
         setSymbolsState(st.feed?.symbols || []);
+        try { const p = await sendCommand("listPresets", {}); setPresets(p.presets || []); setPresetStats(p.presetStats || {}); } catch {}
         for (const topic of ["price", "bar", "leadlag", "metrics", "tradeState", "paperTest"]) {
           try { await sendCommand("subscribe", { topic }); } catch {}
         }
@@ -77,7 +80,17 @@ export function AppProviders({ children }) {
         if (!s) return;
         setBars((prev) => ({ ...prev, [s]: [...(prev[s] || []), msg.payload].slice(-480) }));
       }
-      if (msg.topic === "paperTest") setPaperTest(msg.payload);
+      if (msg.topic === "paperTest") {
+        setPaperTest(msg.payload);
+        if (Array.isArray(msg.payload?.presets) && msg.payload.presets.length) {
+          setPresets((prev) => {
+            const map = new Map(prev.map((p) => [p.name, p]));
+            for (const x of msg.payload.presets) map.set(x.name, { ...(map.get(x.name) || {}), ...x });
+            return Array.from(map.values());
+          });
+        }
+        if (msg.payload?.presetStats) setPresetStats(msg.payload.presetStats);
+      }
       if (msg.topic === "tradeState") setTradeState(msg.payload);
     };
   }, [sendCommand, wsUrl]);
@@ -114,6 +127,10 @@ export function AppProviders({ children }) {
   const createHedgeOrders = (payload) => action("createHedgeOrders", () => sendCommand("createHedgeOrders", payload));
   const getTradingStatus = () => action("getTradingStatus", () => sendCommand("getTradingStatus", {})).then((s) => (setTradingStatus(s), s));
 
+  const listPresets = () => action("listPresets", () => sendCommand("listPresets", {})).then((r) => { setPresets(r.presets || []); setPresetStats(r.presetStats || {}); return r; });
+  const savePreset = (preset) => action("savePreset", () => sendCommand("savePreset", { preset })).then((r) => { setPresets(r.presets || []); return r; });
+  const deletePreset = (name) => action("deletePreset", () => sendCommand("deletePreset", { name })).then((r) => { setPresets(r.presets || []); return r; });
+
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
@@ -127,10 +144,10 @@ export function AppProviders({ children }) {
   }, [status]);
 
   const value = useMemo(() => ({
-    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, tradeState, tradingStatus, uiError, setUiError,
+    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, setUiError,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
-    startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus,
-  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, tradeState, tradingStatus, uiError, connect, disconnect, sendCommand]);
+    startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, listPresets, savePreset, deletePreset,
+  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

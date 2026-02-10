@@ -6,6 +6,7 @@ import { PaperTestPage } from "../../pages/paper/PaperTestPage";
 import { TradingPage } from "../../pages/trading/TradingPage";
 import { HedgePage } from "../../pages/hedge/HedgePage";
 import { HistoryPage } from "../../pages/history/HistoryPage";
+import { PresetsPage } from "../../pages/presets/PresetsPage";
 
 function Layout({ children }) {
   const { uiError, setUiError } = useApp();
@@ -17,6 +18,7 @@ function Layout({ children }) {
           <Nav variant="tabs" className="flex-nowrap">
             <NavLink to="/" end className={linkClass}>Главная</NavLink>
             <NavLink to="/paper" className={linkClass}>Тест (бумажный)</NavLink>
+            <NavLink to="/presets" className={linkClass}>Пресеты</NavLink>
             <NavLink to="/demo" className={linkClass}>Демо торговля</NavLink>
             <NavLink to="/real" className={linkClass}>Реальная торговля</NavLink>
             <NavLink to="/hedge" className={linkClass}>Хеджирование</NavLink>
@@ -37,6 +39,7 @@ export function RoutesView() {
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/paper" element={<PaperTestPage />} />
+        <Route path="/presets" element={<PresetsPage />} />
         <Route path="/demo" element={<TradingPage mode="demo" />} />
         <Route path="/real" element={<TradingPage mode="real" />} />
         <Route path="/hedge" element={<HedgePage />} />

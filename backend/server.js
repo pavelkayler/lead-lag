@@ -488,6 +488,13 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
       return { symbols, limit, minMarketCapUsd };
     },
 
+    async getSymbolsFromRating(payload = {}) {
+      const limit = Math.max(1, Math.min(100, Number(payload.limit) || 100));
+      const minCapUsd = Number(payload.minCapUsd || payload.minMarketCapUsd || 10_000_000);
+      const symbols = await paperTest.cmc.getUniverseFromRating({ limit, minMarketCapUsd: minCapUsd, listingsLimit: 500 });
+      return { symbols, limit, minCapUsd };
+    },
+
     async startFeed() { feed.start(); logger?.log("rpc", { op: "startFeed" }); return { running: true }; },
     async stopFeed() { feed.stop(); logger?.log("rpc", { op: "stopFeed" }); return { running: false }; },
 
@@ -959,7 +966,8 @@ async startPaperTest(payload) {
   const multiStrategy = !!payload?.multiStrategy;
   const exploitBest = !!payload?.exploitBest;
   const isolatedPresetName = payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null;
-  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName });
+  const entryStrictness = Number(payload?.entryStrictness ?? 65);
+  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName, entryStrictness });
   // Also push immediate tradeState snapshot to UI
   hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   return res;
@@ -977,6 +985,21 @@ async resetLearning() {
 async getPaperTestStatus() {
   return paperTest.getStatus();
 },
+
+async listPresets() {
+  return { presets: paperTest.listPresets(), presetStats: paperTest.presetStats || {} };
+},
+
+async savePreset(payload = {}) {
+  const preset = paperTest.upsertPreset(payload?.preset || payload);
+  return { preset, presets: paperTest.listPresets() };
+},
+
+async deletePreset(payload = {}) {
+  const name = String(payload?.name || "");
+  return { presets: paperTest.deletePreset(name) };
+},
+
     async paperReset() {
       paper.reset();
       hub.broadcast("paper", { ts: Date.now(), params: strat.getParams(), state: paper.getState() });

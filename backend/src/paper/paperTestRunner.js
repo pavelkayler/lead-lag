@@ -18,7 +18,14 @@ const DEFAULT_PRESET = {
   slSigma: 1.0,
   maxHoldBars: 20,
   cooldownBars: 20,
+  entryStrictness: 65,
 };
+
+const DEFAULT_PRESETS = [
+  DEFAULT_PRESET,
+  { name: "balanced", qtyUSDT: 20, minCorr: 0.2, stdBars: 160, impulseZ: 2.2, tpSigma: 1.4, slSigma: 1.0, maxHoldBars: 28, cooldownBars: 16, entryStrictness: 60 },
+  { name: "safe", qtyUSDT: 14, minCorr: 0.26, stdBars: 220, impulseZ: 2.4, tpSigma: 1.2, slSigma: 0.8, maxHoldBars: 32, cooldownBars: 28, entryStrictness: 78 },
+];
 
 export class PaperTestRunner {
   constructor({ feed, strategy, broker, hub, universe, logger = null, leadLag = null, rest = null } = {}) {
@@ -41,6 +48,9 @@ export class PaperTestRunner {
     this.instances = new Map();
     this.lastNoTradeAt = Date.now();
     this.lastWaitLogAt = 0;
+    this.lastStrictnessTuneAt = 0;
+    this.presetsCatalog = clone(DEFAULT_PRESETS);
+    this.presetStats = {};
     fs.mkdirSync(this.resultsDir, { recursive: true });
   }
 
@@ -136,7 +146,8 @@ export class PaperTestRunner {
       learning: this.advisor.getLearningPayload(),
       state,
       note,
-      presets: this.status.presets || [],
+      presets: this.presetsCatalog,
+      presetStats: this.presetStats,
       activePresetName: this.status.currentPreset?.name || null,
       selectedSymbols: this.status.symbols || [],
       trades: this._allTrades().slice(0, 200),
@@ -190,12 +201,56 @@ export class PaperTestRunner {
     if ((now - this.lastWaitLogAt) < 10_000) return;
     if ((now - this.lastNoTradeAt) < 10_000) return;
     const { counters, status } = this._collectRejectReasons();
-    const parts = Object.entries(counters).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${k} (x${v})`);
-    this.advisor.logEvent("wait", `WAIT: нет входа. Основная причина: ${parts.join(", ") || "данные копятся"}. ${status}`);
+    const parts = Object.entries(counters).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} (x${v})`);
+    const sample = this.instances.size ? Array.from(this.instances.values())[0]?.strategy : this.strategy;
+    const p = sample?.getParams?.() || {};
+    this.advisor.logEvent("wait", `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}`);
+    if ((now - this.lastStrictnessTuneAt) > 30_000) {
+      this.lastStrictnessTuneAt = now;
+      for (const it of this.instances.values()) {
+        const cur = Number(it.strategy?.getParams?.().entryStrictness ?? it.preset.entryStrictness ?? 65);
+        if (cur > 15) {
+          const next = Math.max(10, cur - 5);
+          it.strategy.setParams({ entryStrictness: next });
+          this.advisor.logEvent("strictness", `Авто-смягчение входа: ${it.preset.name} ${cur}→${next}.`);
+        }
+      }
+    }
     this.lastWaitLogAt = now;
   }
 
-  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 100, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, multiStrategy = false, exploitBest = false, isolatedPresetName = null } = {}) {
+  listPresets() {
+    return clone(this.presetsCatalog);
+  }
+
+  _updatePresetStats() {
+    const stats = {};
+    for (const [name, data] of this.advisor.perPreset.entries()) {
+      const netPnlUSDT = Number(data.netPnlUSDT || 0);
+      const base = this.presetsCatalog.find((p) => p.name === name);
+      const start = Number(base?.startingBalanceUSDT || 1000);
+      stats[name] = { netPnlUSDT, roiPct: start > 0 ? (netPnlUSDT / start) * 100 : 0, trades: Number(data.trades || 0) };
+    }
+    this.presetStats = stats;
+  }
+
+  upsertPreset(preset = {}) {
+    const name = String(preset?.name || "").trim();
+    if (!name) throw new Error("preset.name required");
+    const next = { ...clone(DEFAULT_PRESET), ...clone(preset), name };
+    const idx = this.presetsCatalog.findIndex((p) => p.name === name);
+    if (idx >= 0) this.presetsCatalog[idx] = next;
+    else this.presetsCatalog.push(next);
+    return clone(next);
+  }
+
+  deletePreset(name) {
+    const n = String(name || "").trim();
+    this.presetsCatalog = this.presetsCatalog.filter((p) => p.name !== n);
+    return this.listPresets();
+  }
+
+  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 100, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, multiStrategy = false, exploitBest = false, isolatedPresetName = null, entryStrictness = null } = {}) {
     if (this.running) return this.getStatus();
     this.running = true;
     this.stopRequested = false;
@@ -207,7 +262,7 @@ export class PaperTestRunner {
     const stepMs = Math.max(1, Number(rotateEveryMinutes) || 60) * 60 * 1000;
     const totalMs = hours * 60 * 60 * 1000;
     const steps = Math.max(1, Math.ceil(totalMs / stepMs));
-    let usePresets = Array.isArray(presets) && presets.length ? clone(presets) : [clone(DEFAULT_PRESET)];
+    let usePresets = Array.isArray(presets) && presets.length ? clone(presets) : clone(this.presetsCatalog);
 
     if (!multiStrategy && isolatedPresetName) {
       const one = usePresets.find((p) => p.name === isolatedPresetName);
@@ -232,14 +287,14 @@ export class PaperTestRunner {
       for (const preset of usePresets) {
         const broker = new PaperBroker({ logger: this.logger });
         const strategy = new LeadLagPaperStrategy({ feed: this.feed, leadLag: this.leadLag, broker, hub: this.hub, logger: this.logger });
-        strategy.setParams({ ...preset, enabled: true, name: preset.name });
+        strategy.setParams({ ...preset, entryStrictness: entryStrictness ?? preset.entryStrictness ?? 65, enabled: true, name: preset.name });
         strategy.enable(true);
         strategy.start();
         this.instances.set(preset.name, { broker, strategy, preset });
       }
     } else {
       this.instances.clear();
-      this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name });
+      this.strategy.setParams({ ...usePresets[0], entryStrictness: entryStrictness ?? usePresets[0].entryStrictness ?? 65, enabled: true, name: usePresets[0].name });
       this.strategy.enable(true);
     }
 
@@ -275,7 +330,7 @@ export class PaperTestRunner {
           if (!multiStrategy) {
             const preset = usePresets[i % usePresets.length];
             this.status.currentPreset = preset;
-            this.strategy.setParams({ ...preset, enabled: true, name: preset.name });
+            this.strategy.setParams({ ...preset, entryStrictness: entryStrictness ?? preset.entryStrictness ?? 65, enabled: true, name: preset.name });
           }
 
           const before = this._aggregateSummary();
@@ -306,6 +361,21 @@ export class PaperTestRunner {
 
           if (advice?.proposedPatch && Object.keys(advice.proposedPatch?.changes || {}).length) {
             if (!autoTune) this.advisor.logEvent("auto-tune", `AUTO-TUNE пропущен: autoTune=false preset=${presetName}`);
+            else {
+              const base = usePresets.find((p) => p.name === presetName);
+              if (base) {
+                const stamp = new Date().toLocaleString("sv-SE").replace("T", " ").slice(0, 16);
+                const cloneName = `${presetName} @ ${stamp}`;
+                const tuned = { ...base, ...advice.proposedPatch.changes, name: cloneName };
+                this.upsertPreset(tuned);
+                this.advisor.logEvent("auto-tune", `Создан новый пресет ${cloneName} (из ${presetName}) изменения: ${Object.entries(advice.proposedPatch.changes).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+                if (!multiStrategy && exploitBest) {
+                  usePresets = [tuned];
+                  this.status.currentPreset = tuned;
+                  this.strategy.setParams({ ...tuned, enabled: true, name: tuned.name });
+                }
+              }
+            }
           } else {
             this.advisor.logEvent("auto-tune", `AUTO-TUNE пропущен: нет предложений (мало данных/нет статистики/не выполнены условия) preset=${presetName}`);
           }
@@ -322,6 +392,7 @@ export class PaperTestRunner {
           }
 
           this.status.learning = this.advisor.getLearningPayload();
+          this._updatePresetStats();
           this.status.topPairs = this._buildTopPairs();
           this.status.state = this._deriveRuntimeState();
           this._writeLatest("Running");
@@ -337,6 +408,7 @@ export class PaperTestRunner {
         this.status.endsAt = Date.now();
         this.status.topPairs = this._buildTopPairs();
         this.status.learning = this.advisor.getLearningPayload();
+        this._updatePresetStats();
         this.status.state = "STOPPED";
         this.advisor.setState("STOPPED");
         const note = this.stopRequested ? `Stopped: ${this.status.note || "user"}` : "Completed";

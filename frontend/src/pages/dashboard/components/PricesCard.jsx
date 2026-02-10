@@ -5,12 +5,13 @@ export function PricesCard({ prices, feedStatus }) {
   const rows = Object.entries(prices || {});
   const bn = feedStatus?.binance || null;
   const bnState = bn?.status || (bn?.wsUp ? "OK" : "DOWN");
+  const bnAge = Number.isFinite(Number(bn?.lastMsgAgeMs)) ? `${Number(bn.lastMsgAgeMs)}ms` : "n/a";
 
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div style={{ fontWeight: 900 }}>Prices (last)</div>
-        <div style={{ fontSize: 12, opacity: 0.8 }}>Binance WS: {bnState}{bn?.lastError ? ` • ${bn.lastError}` : ""}</div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>Binance WS: {bnState} • age={bnAge}{bn?.lastError ? ` • ${bn.lastError}` : ""}</div>
       </div>
       <div style={styles.tableWrap}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>

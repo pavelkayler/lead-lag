@@ -97,22 +97,23 @@ import http from "http";
 import crypto from "crypto";
 import { WebSocketServer } from "ws";
 
-import { JsonlLogger } from "./components/logger.js";
-import { WsHub } from "./components/wsHub.js";
-import { FeedManager } from "./components/feedManager.js";
-import { LeadLagService } from "./components/leadLagService.js";
-import { resolveBybitConfig } from "./components/bybitEnv.js";
-import { BybitRestClient } from "./components/bybitRest.js";
-import { TradeState } from "./components/tradeState.js";
+import { JsonlLogger } from "./src/utils/logger.js";
+import { WsHub } from "./src/utils/wsHub.js";
+import { FeedManager } from "./src/feed/feedManager.js";
+import { LeadLagService } from "./src/leadlag/leadLagService.js";
+import { resolveBybitConfig } from "./src/exchange/bybitEnv.js";
+import { BybitRestClient } from "./src/exchange/bybitRest.js";
+import { TradeState } from "./src/trading/tradeState.js";
 
-import { PrivateWsClient } from "./components/privateWsClient.js";
-import { TradeTransport } from "./components/tradeTransport.js";
-import { RiskManager } from "./components/riskManager.js";
+import { PrivateWsClient } from "./src/exchange/privateWsClient.js";
+import { TradeTransport } from "./src/exchange/tradeTransport.js";
+import { RiskManager } from "./src/trading/riskManager.js";
 
-import { PaperBroker } from "./components/paperBroker.js";
-import { LeadLagPaperStrategy } from "./components/paperStrategy.js";
-import { SymbolUniverse } from "./components/symbolUniverse.js";
-import { PaperTestRunner } from "./components/paperTestRunner.js";
+import { PaperBroker } from "./src/paper/paperBroker.js";
+import { LeadLagPaperStrategy } from "./src/paper/paperStrategy.js";
+import { SymbolUniverse } from "./src/utils/symbolUniverse.js";
+import { PaperTestRunner } from "./src/paper/paperTestRunner.js";
+import { LeadLagLiveTrader } from "./src/trading/leadLagLiveTrader.js";
 
 const PORT = process.env.PORT || 8080;
 const BYBIT_CFG = resolveBybitConfig();
@@ -169,6 +170,7 @@ const MAX_BUFFERED_BYTES = 256 * 1024;
 
 const DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"];
 const MAX_BARS_SNAPSHOT = 480;
+let HTTP_CTX = { feed: null };
 
 function safeJsonParse(text) {
   try {
@@ -202,15 +204,55 @@ function sendEvent(ws, topic, payload) {
 function makeOk(id, payload) { return { type: "response", id, ok: true, payload }; }
 function makeErr(id, error) { return { type: "response", id, ok: false, error: String(error) }; }
 
+function toHtmlTable(title, rows) {
+  const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  if (!rows?.length) return `<h3>${esc(title)}</h3><p>Нет данных</p>`;
+  const cols = Object.keys(rows[0]);
+  const thead = `<tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>`;
+  const tbody = rows.map((r) => `<tr>${cols.map((c) => `<td>${esc(r[c])}</td>`).join("")}</tr>`).join("\n");
+  return `<h3>${esc(title)}</h3><table border="1" cellspacing="0" cellpadding="6"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
+}
+
 function createHttpServer() {
   return http.createServer((req, res) => {
-    if (req.url === "/health") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+    const u = new URL(req.url || "/", `http://${req.headers.host || 'localhost'}`);
+    if (u.pathname === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
-    res.writeHead(404);
-    res.end();
+    if (u.pathname === "/bars") {
+      const symbol = (u.searchParams.get("symbol") || "").toUpperCase();
+      const n = Math.max(1, Math.min(MAX_BARS_SNAPSHOT, Number(u.searchParams.get("n") || 240)));
+      if (!symbol) { res.writeHead(400, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "symbol is required" })); return; }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ symbol, bars: HTTP_CTX.feed?.getBars(symbol, n) || [] }));
+      return;
+    }
+    if (u.pathname === "/results/latest") {
+      const f = path.join(process.cwd(), "results", "latest.json");
+      if (!fs.existsSync(f)) { res.writeHead(404, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "Not found" })); return; }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(fs.readFileSync(f, "utf8"));
+      return;
+    }
+    if (u.pathname === "/results/latest/table") {
+      const f = path.join(process.cwd(), "results", "latest.json");
+      if (!fs.existsSync(f)) { res.writeHead(404, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "Not found" })); return; }
+      const data = JSON.parse(fs.readFileSync(f, "utf8"));
+      const summaryRows = Object.entries(data.summary || {}).filter(([,v]) => typeof v !== 'object').map(([metric,value]) => ({ metric, value }));
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>Lead-Lag results</title></head><body>${toHtmlTable("Summary", summaryRows)}${toHtmlTable("PresetsByHour", data.presetsByHour || [])}${toHtmlTable("TopPairs", data.topPairs || [])}</body></html>`;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
   });
 }
 
@@ -311,7 +353,7 @@ function startMetricsTicker(ctx, feed, hub, leadLag, priv, trade, risk, paper, s
 }
 
 
-function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest }) {
+function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader }) {
 
   // Step 14: order timeout cancels (best-effort)
   const _orderTimeouts = new Map(); // orderId -> timeoutId
@@ -360,6 +402,7 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
         risk: { enableTrading: risk.enableTrading, haltTrading: risk.haltTrading, maxNotionalUSDT: risk.maxNotionalUSDT, orderTimeoutMs: risk.orderTimeoutMs, maxOpenOrders: risk.maxOpenOrders },
         tradeState: tradeState ? tradeState.summary() : null,
       paper: { params: strat.getParams(), state: paper.getState() },
+      feedMaxSymbols: Number(process.env.FEED_MAX_SYMBOLS || 50),
       };
     },
 
@@ -410,11 +453,12 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
 
     async setSymbols(payload) {
       const symbols = payload?.symbols;
-      if (!Array.isArray(symbols) || symbols.length === 0) throw new Error("setSymbols: payload.symbols must be non-empty array");
-      if (symbols.length > 5) throw new Error("setSymbols: max 5 symbols");
-      feed.setSymbols(symbols);
+      const max = Number(process.env.FEED_MAX_SYMBOLS || 50);
+      if (!Array.isArray(symbols) || symbols.length === 0) throw new Error("Необходимо указать список символов");
+      if (symbols.length > max) throw new Error(`Превышен лимит символов: максимум ${max}`);
+      feed.setSymbols(symbols.map((s) => String(s).toUpperCase()));
       logger?.log("rpc", { op: "setSymbols", symbols });
-      return { symbols: feed.symbols || symbols };
+      return { symbols: feed.symbols || symbols, feedMaxSymbols: max };
     },
 
     async startFeed() { feed.start(); logger?.log("rpc", { op: "startFeed" }); return { running: true }; },
@@ -715,6 +759,32 @@ const estNotional = qty * mid;
       return { ok: true, results: out };
     },
 
+
+    async getOpenOrders() { return tradeState.getOpenOrders(); },
+    async cancelAllOrders(payload = {}) {
+      const symbol = payload?.symbol ? String(payload.symbol).toUpperCase() : null;
+      const symbols = symbol ? [symbol] : (Array.isArray(feed.symbols) && feed.symbols.length ? feed.symbols.slice(0, 5) : ["BTCUSDT"]);
+      const results = [];
+      for (const sym of symbols) {
+        const resp = await rest.post("/v5/order/cancel-all", { category: "linear", symbol: sym });
+        results.push({ symbol: sym, retCode: resp?.retCode, retMsg: resp?.retMsg, result: resp?.result });
+      }
+      return { retCode: 0, retMsg: "OK", results };
+    },
+    async closeAllPositions(payload = {}) {
+      const positions = tradeState?.getPositions?.() || [];
+      const out = [];
+      for (const p of positions) {
+        const sym = String(p?.symbol || "");
+        const size = Number(p?.size ?? 0);
+        if (!sym || !Number.isFinite(size) || size === 0) continue;
+        const sideClose = String(p?.side || "Buy") === "Buy" ? "Sell" : "Buy";
+        const resp = await orderCreateWithPositionIdxFallback(rest, { category: "linear", symbol: sym, side: sideClose, orderType: "Market", qty: String(Math.abs(size)), reduceOnly: true, timeInForce: "IOC" }, logger);
+        out.push({ symbol: sym, ok: resp?.retCode === 0, retCode: resp?.retCode, retMsg: resp?.retMsg });
+      }
+      return { ok: true, results: out };
+    },
+
     async killSwitch(payload = {}) {
       const on = payload?.on !== undefined ? !!payload.on : true;
       const reason = String(payload?.reason || "");
@@ -738,6 +808,57 @@ const estNotional = qty * mid;
       const ok = await tradeState.reconcile(rest, { positions: true, orders: true, wallet: true });
       hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 30 }));
       return { ok, summary: tradeState.summary() };
+    },
+
+    async startTrading(payload = {}) {
+      const mode = payload?.mode || "demo";
+      const params = payload?.params || {};
+      if (!process.env.BYBIT_API_KEY || !process.env.BYBIT_API_SECRET) throw new Error("Не указаны ключи BYBIT_API_KEY/BYBIT_API_SECRET");
+      if (mode === "real" && process.env.BYBIT_ALLOW_MAINNET !== "1") throw new Error("Реальная торговля не разрешена (установите BYBIT_ALLOW_MAINNET=1)");
+      if (!feed.running) {
+        const symbols = await (new SymbolUniverse({ bybitRest: rest, logger })).getTopUSDTPerps({ count: 30, minMarketCapUsd: 10_000_000 });
+        feed.setSymbols(symbols);
+        feed.start();
+      }
+      process.env.ENABLE_TRADING = "1";
+      risk.setHalt(false);
+      liveTrader.start({ mode, params });
+      return { trading: true, mode, paramsApplied: true };
+    },
+
+    async stopTrading() {
+      liveTrader.stop();
+      risk.setHalt(true, "stopTrading");
+      process.env.ENABLE_TRADING = "0";
+      return { trading: false };
+    },
+
+    async getTradingStatus() {
+      return liveTrader.status();
+    },
+
+    async createHedgeOrders(payload = {}) {
+      const symbol = String(payload.symbol || "BTCUSDT").toUpperCase();
+      const offsetPercent = Number(payload.offsetPercent ?? 1);
+      const qtyUSDT = Number(payload.qtyUSDT ?? process.env.DEFAULT_QTY_USDT ?? 25);
+      const tp = payload.takeProfit || { type: "roiPct", value: 1 };
+      const sl = payload.stopLoss || { type: "roiPct", value: 2 };
+      if (Number(sl.value) <= Number(tp.value)) throw new Error("Stop Loss должен быть больше Take Profit");
+      const mid = feed.getMid(symbol);
+      if (!Number.isFinite(mid) || mid <= 0) throw new Error("Нет цены для символа");
+      const qty = Math.max(0.001, qtyUSDT / mid);
+      const longTrigger = mid * (1 + offsetPercent / 100);
+      const shortTrigger = mid * (1 - offsetPercent / 100);
+      const groupId = `HEDGE-${Date.now()}`;
+      const mkTpSl = (entry, side) => {
+        const isRoi = tp.type === "roiPct";
+        const tpVal = isRoi ? entry * (Number(tp.value) / 100) : Number(tp.value);
+        const slVal = (sl.type === "roiPct") ? entry * (Number(sl.value) / 100) : Number(sl.value);
+        return side === "Buy" ? { takeProfit: String(entry + tpVal), stopLoss: String(entry - slVal) } : { takeProfit: String(entry - tpVal), stopLoss: String(entry + slVal) };
+      };
+      const long = await rest.post("/v5/order/create", { category: "linear", symbol, side: "Buy", orderType: "Market", qty: String(qty), triggerPrice: String(longTrigger), triggerDirection: 1, triggerBy: "MarkPrice", orderLinkId: `${groupId}-LONG`, ...mkTpSl(longTrigger, "Buy") });
+      const short = await rest.post("/v5/order/create", { category: "linear", symbol, side: "Sell", orderType: "Market", qty: String(qty), triggerPrice: String(shortTrigger), triggerDirection: 2, triggerBy: "MarkPrice", orderLinkId: `${groupId}-SHORT`, ...mkTpSl(shortTrigger, "Sell") });
+      return { ok: true, groupId, orders: [{ longOrderId: long?.result?.orderId, shortOrderId: short?.result?.orderId }] };
     },
 
     // Step 9 paper
@@ -798,6 +919,7 @@ const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
     logger,
   });
   feed.setSymbols(DEFAULT_SYMBOLS);
+  HTTP_CTX.feed = feed;
 
   const leadLag = new LeadLagService({ feed, hub, logger, intervalMs: 2000, windowBars: 240, maxLagBars: 20, minBars: 120 });
   leadLag.start();
@@ -830,12 +952,12 @@ const risk = new RiskManager({ allowSymbols: DEFAULT_SYMBOLS, logger });
 
 const universe = new SymbolUniverse({ bybitRest: rest, logger });
 const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger });
-
+  const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, logger });
 
   strat.start(); // timer
   // strat.enable(false) by default
 
-  const handlers = makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest });
+  const handlers = makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader });
 
 
 // Step 15: keep TradeState in sync even when private WS lags (demo env)

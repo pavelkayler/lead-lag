@@ -25,16 +25,18 @@ export function AppProviders({ children }) {
   const [tradeState, setTradeState] = useState(null);
   const [tradingStatus, setTradingStatus] = useState({ trading: false, mode: "demo" });
   const [uiError, setUiError] = useState("");
+  const [activePath, setActivePath] = useState(() => window.location.pathname || "/");
 
-  const sendCommand = useCallback((type, payload = {}, timeoutMs = 8000) => {
+  const sendCommand = useCallback((type, payload = {}, timeoutMs = null) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== 1) return Promise.reject(new Error("WS не подключён"));
     const id = makeId(type);
     return new Promise((resolve, reject) => {
+      const effectiveTimeout = Number(timeoutMs ?? ({ createHedgeOrders: 3000, startPaperTest: 3000 }[type] ?? 8000));
       const t = setTimeout(() => {
         pendingRef.current.delete(id);
         reject(new Error(`Timeout ${type}`));
-      }, timeoutMs);
+      }, effectiveTimeout);
       pendingRef.current.set(id, { resolve, reject, t });
       ws.send(JSON.stringify({ type, id, payload }));
     });
@@ -72,8 +74,8 @@ export function AppProviders({ children }) {
       }
       if (msg.type !== "event") return;
       if (msg.topic === "hello") setClientId(msg.payload?.clientId || null);
-      if (msg.topic === "price") setPrices((prev) => ({ ...prev, [msg.payload.symbol]: msg.payload }));
-      if (msg.topic === "leadlag") setLeadlag(msg.payload?.top || []);
+      if (msg.topic === "price" && activePath === "/") setPrices((prev) => ({ ...prev, [msg.payload.symbol]: msg.payload }));
+      if (msg.topic === "leadlag" && activePath === "/") setLeadlag(msg.payload?.top || []);
       if (msg.topic === "metrics") setMetrics(msg.payload || null);
       if (msg.topic === "bar") {
         const s = msg.payload?.symbol;
@@ -91,9 +93,19 @@ export function AppProviders({ children }) {
         }
         if (msg.payload?.presetStats) setPresetStats(msg.payload.presetStats);
       }
-      if (msg.topic === "tradeState") setTradeState(msg.payload);
+      if (msg.topic === "tradeState") {
+        const payload = msg.payload || {};
+        const normalizeOrder = (o = {}) => ({ ...o, linkId: o.linkId || o.orderLinkId || o.order_link_id || o.order_linkId || null, orderStatus: o.orderStatus || o.order_status || o.status || null });
+        setTradeState({
+          ...payload,
+          openOrders: (payload.openOrders || payload.orders || []).map(normalizeOrder),
+          orders: (payload.orders || payload.openOrders || []).map(normalizeOrder),
+          positions: payload.positions || [],
+          executions: payload.executions || [],
+        });
+      }
     };
-  }, [sendCommand, wsUrl]);
+  }, [sendCommand, wsUrl, activePath]);
 
   const disconnect = useCallback(() => { try { wsRef.current?.close(); } catch {} }, []);
 
@@ -132,23 +144,38 @@ export function AppProviders({ children }) {
   const savePreset = (preset) => action("savePreset", () => sendCommand("savePreset", { preset })).then((r) => { setPresets(r.presets || []); return r; });
   const deletePreset = (name) => action("deletePreset", () => sendCommand("deletePreset", { name })).then((r) => { setPresets(r.presets || []); return r; });
 
+
+  useEffect(() => {
+    const onNav = () => setActivePath(window.location.pathname || "/");
+    window.addEventListener("popstate", onNav);
+    window.addEventListener("hashchange", onNav);
+    const click = () => setTimeout(onNav, 0);
+    window.addEventListener("click", click);
+    return () => {
+      window.removeEventListener("popstate", onNav);
+      window.removeEventListener("hashchange", onNav);
+      window.removeEventListener("click", click);
+    };
+  }, []);
+
   useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       if (status !== "connected") return;
       try {
+        if (activePath !== "/paper") return;
         const res = await fetch("http://localhost:8080/results/latest");
         if (res.ok) setPaperTest(await res.json());
       } catch {}
     }, 10000);
     return () => clearInterval(pollRef.current);
-  }, [status]);
+  }, [status, activePath]);
 
   const value = useMemo(() => ({
-    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, setUiError,
+    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, setUiError, activePath,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
     startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
-  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, connect, disconnect, sendCommand]);
+  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, bars, paperTest, presets, presetStats, tradeState, tradingStatus, uiError, activePath, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

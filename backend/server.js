@@ -901,66 +901,47 @@ const estNotional = qty * mid;
       if (Number(sl.value) <= Number(tp.value)) throw new Error("Stop Loss должен быть больше Take Profit");
       const mid = feed.getMid(symbol);
       if (!Number.isFinite(mid) || mid <= 0) throw new Error("Нет цены для символа");
-      const rawQty = Math.max(0.001, qtyUSDT / mid);
-      const qty = await normalizeQty(symbol, rawQty);
-      const longTrigger = mid * (1 + offsetPercent / 100);
-      const shortTrigger = mid * (1 - offsetPercent / 100);
+
       const groupId = `HEDGE-${Date.now()}`;
+      Promise.resolve().then(async () => {
+        const rawQty = Math.max(0.001, qtyUSDT / mid);
+        const qty = await normalizeQty(symbol, rawQty);
+        const longTrigger = mid * (1 + offsetPercent / 100);
+        const shortTrigger = mid * (1 - offsetPercent / 100);
 
-      let leverage = 10;
-      try {
-        const posResp = await rest.get("/v5/position/list", { category: "linear", symbol });
-        const firstPos = posResp?.result?.list?.[0] || {};
-        const parsedLev = Number(firstPos.leverage);
-        if (Number.isFinite(parsedLev) && parsedLev > 0) leverage = parsedLev;
-      } catch (e) {
-        logger?.log("hedge_leverage_fallback", { symbol, leverage, error: String(e?.message || e) });
-      }
+        let leverage = 10;
+        try {
+          const posResp = await rest.get("/v5/position/list", { category: "linear", symbol });
+          const firstPos = posResp?.result?.list?.[0] || {};
+          const parsedLev = Number(firstPos.leverage);
+          if (Number.isFinite(parsedLev) && parsedLev > 0) leverage = parsedLev;
+        } catch (e) {
+          logger?.log("hedge_leverage_fallback", { symbol, leverage, error: String(e?.message || e) });
+        }
 
-      const mkTpSl = (entry, side) => {
-        const tpType = tp.type || "roiPct";
-        const slType = sl.type || "roiPct";
-        const isBuy = side === "Buy";
+        const mkTpSl = (entry, side) => {
+          const tpType = tp.type || "roiPct";
+          const slType = sl.type || "roiPct";
+          const isBuy = side === "Buy";
+          const tpDelta = tpType === "pnlUSDT" ? (Number(tp.value) / Number(qty || 1)) : entry * ((Number(tp.value) / Math.max(leverage, 1)) / 100);
+          const slDelta = slType === "pnlUSDT" ? (Number(sl.value) / Number(qty || 1)) : entry * ((Number(sl.value) / Math.max(leverage, 1)) / 100);
+          return isBuy ? { takeProfit: String(entry + tpDelta), stopLoss: String(entry - slDelta) } : { takeProfit: String(entry - tpDelta), stopLoss: String(entry + slDelta) };
+        };
 
-        const tpDelta = tpType === "pnlUSDT"
-          ? (Number(tp.value) / Number(qty || 1))
-          : entry * ((Number(tp.value) / Math.max(leverage, 1)) / 100);
-        const slDelta = slType === "pnlUSDT"
-          ? (Number(sl.value) / Number(qty || 1))
-          : entry * ((Number(sl.value) / Math.max(leverage, 1)) / 100);
+        await orderCreateWithPositionIdxFallback(rest, {
+          category: "linear", symbol, side: "Buy", orderType: "Market", qty: String(qty), triggerPrice: String(longTrigger), triggerDirection: 1, triggerBy: "MarkPrice", orderLinkId: `${groupId}-LONG`, ...mkTpSl(longTrigger, "Buy"),
+        }, logger);
+        await orderCreateWithPositionIdxFallback(rest, {
+          category: "linear", symbol, side: "Sell", orderType: "Market", qty: String(qty), triggerPrice: String(shortTrigger), triggerDirection: 2, triggerBy: "MarkPrice", orderLinkId: `${groupId}-SHORT`, ...mkTpSl(shortTrigger, "Sell"),
+        }, logger);
 
-        return isBuy
-          ? { takeProfit: String(entry + tpDelta), stopLoss: String(entry - slDelta) }
-          : { takeProfit: String(entry - tpDelta), stopLoss: String(entry + slDelta) };
-      };
+        await tradeState.reconcile(rest, { positions: true, orders: true, wallet: false });
+        hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 30 }));
+      }).catch((e) => {
+        logger?.log("hedge_create_error", { symbol, groupId, error: String(e?.message || e) });
+      });
 
-      const long = await orderCreateWithPositionIdxFallback(rest, {
-        category: "linear",
-        symbol,
-        side: "Buy",
-        orderType: "Market",
-        qty: String(qty),
-        triggerPrice: String(longTrigger),
-        triggerDirection: 1,
-        triggerBy: "MarkPrice",
-        orderLinkId: `${groupId}-LONG`,
-        ...mkTpSl(longTrigger, "Buy"),
-      }, logger);
-
-      const short = await orderCreateWithPositionIdxFallback(rest, {
-        category: "linear",
-        symbol,
-        side: "Sell",
-        orderType: "Market",
-        qty: String(qty),
-        triggerPrice: String(shortTrigger),
-        triggerDirection: 2,
-        triggerBy: "MarkPrice",
-        orderLinkId: `${groupId}-SHORT`,
-        ...mkTpSl(shortTrigger, "Sell"),
-      }, logger);
-
-      return { ok: true, groupId, leverage, orders: [{ longOrderId: long?.result?.orderId, shortOrderId: short?.result?.orderId }] };
+      return { ok: true, queued: true, groupId };
     },
 
     // Step 9 paper
@@ -981,17 +962,21 @@ const estNotional = qty * mid;
 async startPaperTest(payload) {
   const durationHours = Number(payload?.durationHours || 8);
   const rotateEveryMinutes = Number(payload?.rotateEveryMinutes || 60);
-  const symbolsCount = Number(payload?.symbolsCount || 100);
+  const symbolsCount = Number(payload?.symbolsCount || 300);
   const minMarketCapUsd = Number(payload?.minMarketCapUsd || 10_000_000);
   const presets = Array.isArray(payload?.presets) ? payload.presets : null;
   const multiStrategy = !!payload?.multiStrategy;
   const exploitBest = !!payload?.exploitBest;
   const isolatedPresetName = payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null;
-  const entryStrictness = Number(payload?.entryStrictness ?? 65);
-  const res = await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName, entryStrictness });
-  // Also push immediate tradeState snapshot to UI
-  hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
-  return res;
+
+  Promise.resolve().then(async () => {
+    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName });
+    hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
+  }).catch((e) => {
+    logger?.log("paper_test_start_error", { error: String(e?.message || e) });
+  });
+
+  return { ok: true, queued: true };
 },
 
 async stopPaperTest(payload) {

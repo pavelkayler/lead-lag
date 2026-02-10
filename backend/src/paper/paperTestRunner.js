@@ -53,6 +53,7 @@ export class PaperTestRunner {
     this.lastStrictnessTuneAt = 0;
     this.presetsCatalog = clone(DEFAULT_PRESETS);
     this.presetStats = {};
+    this.sessionWorkingPreset = new Map();
     fs.mkdirSync(this.resultsDir, { recursive: true });
     try {
       if (fs.existsSync(this.presetsPath)) {
@@ -222,13 +223,14 @@ export class PaperTestRunner {
         const cur = Number(it.strategy?.getParams?.().entryStrictness ?? it.preset.entryStrictness ?? 65);
         if (cur > 15) {
           const next = Math.max(10, cur - 5);
-          const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-          const cloneName = `${it.preset.name} @ ${stamp}`;
-          const cloned = { ...it.preset, name: cloneName, entryStrictness: next, blacklistSymbols: [...(it.preset.blacklistSymbols || [])] };
-          this.upsertPreset(cloned);
-          it.preset = cloned;
-          it.strategy.setParams({ ...cloned, name: cloneName, fixedLeaders: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] });
-          this.advisor.logEvent("strictness", `Создан новый пресет ${cloneName} из ${it.preset.name}, изменения: {entryStrictness:${cur}->${next}}`);
+          const currentName = String(it.preset?.name || "");
+          const baseName = currentName.includes(" @ ") ? currentName.split(" @ ")[0] : currentName;
+          const workingName = this.sessionWorkingPreset.get(baseName) || currentName;
+          const tuned = { ...it.preset, name: workingName, entryStrictness: next, blacklistSymbols: [...(it.preset.blacklistSymbols || [])] };
+          this.upsertPreset(tuned);
+          it.preset = tuned;
+          it.strategy.setParams({ ...tuned, name: tuned.name, fixedLeaders: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] });
+          this.advisor.logEvent("strictness", `Обновлён рабочий пресет ${tuned.name}: {entryStrictness:${cur}->${next}}`);
         }
       }
       this.status.presets = this.listPresets();
@@ -280,6 +282,7 @@ export class PaperTestRunner {
     this.running = true;
     this.stopRequested = false;
     this.instances.clear();
+    this.sessionWorkingPreset.clear();
 
     const runId = `paper-${Date.now()}`;
     const startedAt = Date.now();
@@ -294,6 +297,17 @@ export class PaperTestRunner {
       usePresets = one ? [one] : [usePresets[0]];
     }
 
+    if (autoTune) {
+      usePresets = usePresets.map((preset) => {
+        const stamp = new Date(startedAt).toISOString().slice(0, 16).replace("T", " ");
+        const cloneName = `${preset.name} @ ${stamp}`;
+        const cloned = { ...preset, name: cloneName, blacklistSymbols: [...(preset.blacklistSymbols || [])] };
+        this.upsertPreset(cloned);
+        this.sessionWorkingPreset.set(preset.name, cloneName);
+        this.advisor.logEvent("auto-tune", `Создан рабочий пресет ${cloneName} из ${preset.name}.`);
+        return cloned;
+      });
+    }
     this.advisor.updateOnStart(usePresets);
 
     let symbols;
@@ -389,11 +403,9 @@ export class PaperTestRunner {
             else {
               const base = usePresets.find((p) => p.name === presetName);
               if (base) {
-                const stamp = new Date().toLocaleString("sv-SE").replace("T", " ").slice(0, 16);
-                const cloneName = `${presetName} @ ${stamp}`;
-                const tuned = { ...base, ...advice.proposedPatch.changes, name: cloneName };
+                const tuned = { ...base, ...advice.proposedPatch.changes, name: base.name };
                 this.upsertPreset(tuned);
-                this.advisor.logEvent("auto-tune", `Создан новый пресет ${cloneName} (из ${presetName}) изменения: ${Object.entries(advice.proposedPatch.changes).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+                this.advisor.logEvent("auto-tune", `Обновлён рабочий пресет ${tuned.name}: ${Object.entries(advice.proposedPatch.changes).map(([k, v]) => `${k}=${v}`).join(", ")}`);
                 if (!multiStrategy && exploitBest) {
                   usePresets = [tuned];
                   this.status.currentPreset = tuned;
@@ -450,6 +462,7 @@ export class PaperTestRunner {
     if (!this.running) return this.getStatus();
     this.stopRequested = true;
     this.status.note = reason;
+    this.status.endsAt = Date.now();
     this.advisor.logEvent("stop", "Тест остановлен.");
     this.status.learning = this.advisor.getLearningPayload();
     this._writeLatest(`Stopped: ${reason}`);

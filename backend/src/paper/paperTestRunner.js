@@ -23,6 +23,18 @@ const DEFAULT_PRESET = {
   blacklist: [],
   useFixedLeaders: false,
   autoExcludeNoMatchThreshold: 100,
+  autoTune: {
+    enabled: true,
+    startTuningAfterMin: 12,
+    tuningIntervalSec: 90,
+    targetMinTradesPerHour: 1,
+    bounds: {
+      minCorr: { floor: 0.05, ceil: 0.4 },
+      impulseZ: { floor: 1.2, ceil: 4 },
+      confirmZ: { floor: 0.05, ceil: 1 },
+      edgeMult: { floor: 1.5, ceil: 8 },
+    },
+  },
 };
 
 
@@ -73,6 +85,8 @@ export class PaperTestRunner {
     this.presetsCatalog = clone(DEFAULT_PRESETS);
     this.presetStats = {};
     this.sessionWorkingPreset = new Map();
+    this.lastWaitMessage = "";
+    this.logDedup = new Map();
     fs.mkdirSync(this.resultsDir, { recursive: true });
     try {
       if (fs.existsSync(this.presetsPath)) {
@@ -229,6 +243,14 @@ export class PaperTestRunner {
     return { counters, status };
   }
 
+  _shouldLogOnce(key, ttlMs = 4000) {
+    const now = Date.now();
+    const prev = Number(this.logDedup.get(key) || 0);
+    if ((now - prev) < ttlMs) return false;
+    this.logDedup.set(key, now);
+    return true;
+  }
+
   _emitWaitLog() {
     const now = Date.now();
     if ((now - this.lastWaitLogAt) < 10_000) return;
@@ -237,7 +259,11 @@ export class PaperTestRunner {
     const parts = Object.entries(counters).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} (x${v})`);
     const sample = this.instances.size ? Array.from(this.instances.values())[0]?.strategy : this.strategy;
     const p = sample?.getParams?.() || {};
-    this.advisor.logEvent("wait", `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}. Следующий шаг: ждём подтверждённый импульс лидера и сигнал фолловера.`);
+    const message = `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}. Следующий шаг: ждём подтверждённый импульс лидера и сигнал фолловера.`;
+    if (this.lastWaitMessage !== message || (now - this.lastWaitLogAt) >= 10_000) {
+      this.advisor.logEvent("wait", message);
+      this.lastWaitMessage = message;
+    }
     if ((now - this.lastStrictnessTuneAt) > 30_000) {
       this.lastStrictnessTuneAt = now;
       const targets = this.instances.size ? Array.from(this.instances.values()) : [{ strategy: this.strategy, preset: this.status.currentPreset || this.presetsCatalog[0] }];
@@ -373,7 +399,7 @@ export class PaperTestRunner {
     return this.listPresets();
   }
 
-  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 300, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, autoTuneConfig = {}, multiStrategy = false, exploitBest = false, isolatedPresetName = null, useBybit = true, useBinance = true } = {}) {
+  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 300, minMarketCapUsd = 10_000_000, presets = null, autoTune = true, multiStrategy = false, exploitBest = false, isolatedPresetName = null, useBybit = true, useBinance = true } = {}) {
     if (this.running) return this.getStatus();
     this.running = true;
     this.stopRequested = false;
@@ -438,7 +464,15 @@ export class PaperTestRunner {
       this.strategy.enable(true);
     }
 
-    const tuneCfg = { enabled: autoTune !== false, startTuningAfterMin: Number(autoTuneConfig?.startTuningAfterMin || 12), tuningIntervalSec: Number(autoTuneConfig?.tuningIntervalSec || 90), targetMinTradesPerHour: Number(autoTuneConfig?.targetMinTradesPerHour || 1), bounds: autoTuneConfig?.bounds || {} };
+    const activePreset = usePresets[0] || {};
+    const presetTune = activePreset.autoTune || {};
+    const tuneCfg = {
+      enabled: autoTune !== false && presetTune.enabled !== false,
+      startTuningAfterMin: Number(presetTune?.startTuningAfterMin || 12),
+      tuningIntervalSec: Number(presetTune?.tuningIntervalSec || 90),
+      targetMinTradesPerHour: Number(presetTune?.targetMinTradesPerHour || 1),
+      bounds: presetTune?.bounds || {},
+    };
 
     this.status = {
       running: true,
@@ -589,7 +623,11 @@ export class PaperTestRunner {
     const leader = Number(ev.noMatchAsLeaderCount || 0);
     const follower = Number(ev.noMatchAsFollowerCount || 0);
     const threshold = Number(ev.threshold || 100);
-    this.advisor.logEvent("exclude", `[EXCLUDE] Исключил ${symbol} (${source}): noMatch leader=${leader} follower=${follower} threshold=${threshold}`);
+    const minNoMatch = Math.min(leader, follower);
+    const msg = `[EXCLUDE] Исключил ${symbol} (${source}): minNoMatchAcrossOthers=${minNoMatch} threshold=${threshold}`;
+    if (this._shouldLogOnce(`exclude:${symbol}:${source}:${minNoMatch}:${threshold}`, 5000)) {
+      this.advisor.logEvent("exclude", msg);
+    }
     this.status.presets = this.listPresets();
     this._broadcast();
   }

@@ -8,6 +8,7 @@ import { HedgePage } from "../../pages/hedge/HedgePage";
 import { HistoryPage } from "../../pages/history/HistoryPage";
 import { PresetsPage } from "../../pages/presets/PresetsPage";
 import { RangeMetricsPage } from "../../pages/range/RangeMetricsPage";
+import { BoundaryFlipPage } from "../../pages/boundary/BoundaryFlipPage";
 
 function Layout({ children }) {
   const { uiError, setUiError } = useApp();
@@ -25,6 +26,7 @@ function Layout({ children }) {
             <NavLink to="/hedge" className={linkClass}>Хеджирование</NavLink>
             <NavLink to="/history" className={linkClass}>История</NavLink>
             <NavLink to="/arb" className={linkClass}>Арбитражный бот</NavLink>
+            <NavLink to="/boundary-flip" className={linkClass}>Boundary Flip Bot</NavLink>
             <NavLink to="/range-metrics" className={linkClass}>Range Metrics</NavLink>
           </Nav>
         </div>
@@ -47,6 +49,7 @@ export function RoutesView() {
         <Route path="/hedge" element={<HedgePage />} />
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/arb" element={<div>В разработке.</div>} />
+        <Route path="/boundary-flip" element={<BoundaryFlipPage />} />
         <Route path="/range-metrics" element={<RangeMetricsPage />} />
       </Routes>
     </Layout>

@@ -13,6 +13,7 @@ const ROUTE_TOPICS = {
   "/real": ["tradeState", "price"],
   "/presets": [],
   "/range-metrics": ["rangeMetrics"],
+  "/boundary-flip": ["boundaryFlipBot"],
 };
 
 function topicsForPath(pathname = "/") {
@@ -42,6 +43,7 @@ export function AppProviders({ children }) {
   const [tradeState, setTradeState] = useState(null);
   const [tradingStatus, setTradingStatus] = useState({ trading: false, mode: "demo" });
   const [rangeMetrics, setRangeMetrics] = useState({ status: null, candidates: [], logs: [], lastPlan: null, noTrade: [] });
+  const [boundaryFlip, setBoundaryFlip] = useState({ status: null, logs: [] });
   const [uiError, setUiError] = useState("");
   const [activePath, setActivePath] = useState(() => window.location.pathname || "/");
 
@@ -122,6 +124,14 @@ export function AppProviders({ children }) {
         }
         if (msg.payload?.presetStats) setPresetStats(msg.payload.presetStats);
       }
+      if (msg.topic === "boundaryFlipBot") {
+        const evt = msg.payload || {};
+        setBoundaryFlip((prev) => {
+          if (evt.kind === "status") return { ...prev, status: evt.payload || null };
+          if (evt.kind === "log") return { ...prev, logs: [evt.payload, ...(prev.logs || [])].slice(0, 400) };
+          return prev;
+        });
+      }
       if (msg.topic === "rangeMetrics") {
         const evt = msg.payload || {};
         setRangeMetrics((prev) => {
@@ -200,6 +210,9 @@ export function AppProviders({ children }) {
   const setRangeMetricsConfig = (cfg) => action("setRangeMetricsConfig", () => sendCommand("setRangeMetricsConfig", cfg || {}));
   const getRangeMetricsStatus = () => action("getRangeMetricsStatus", () => sendCommand("getRangeMetricsStatus", {}));
   const getRangeMetricsCandidates = () => action("getRangeMetricsCandidates", () => sendCommand("getRangeMetricsCandidates", {}));
+  const startBoundaryFlipBot = (cfg) => action("startBoundaryFlipBot", () => sendCommand("startBoundaryFlipBot", cfg || {}));
+  const stopBoundaryFlipBot = () => action("stopBoundaryFlipBot", () => sendCommand("stopBoundaryFlipBot", {}));
+  const getBoundaryFlipBotStatus = () => action("getBoundaryFlipBotStatus", () => sendCommand("getBoundaryFlipBotStatus", {}));
 
   useEffect(() => {
     const onNav = () => setActivePath(window.location.pathname || "/");
@@ -250,17 +263,21 @@ export function AppProviders({ children }) {
           const c = await sendCommand("getRangeMetricsCandidates", {});
           setRangeMetrics((prev) => ({ ...prev, status: st, candidates: c.candidates || prev.candidates }));
         }
+        if (activePath === "/boundary-flip") {
+          const st = await sendCommand("getBoundaryFlipBotStatus", {});
+          setBoundaryFlip((prev) => ({ ...prev, status: st }));
+        }
       } catch {}
     }, 10000);
     return () => clearInterval(pollRef.current);
   }, [status, activePath]);
 
   const value = useMemo(() => ({
-    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, setUiError, activePath,
+    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, setUiError, activePath,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
     startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
-    startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates,
-  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, uiError, activePath, connect, disconnect, sendCommand]);
+    startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates, startBoundaryFlipBot, stopBoundaryFlipBot, getBoundaryFlipBotStatus,
+  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, activePath, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

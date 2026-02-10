@@ -33,6 +33,7 @@ export class LeadLagPaperStrategy {
     this.blacklistBySource = new Map();
     this.noMatchAsLeaderCount = new Map();
     this.noMatchAsFollowerCount = new Map();
+    this.noMatchPairCount = new Map();
     this.autoExcludedSeries = new Set();
     this.autoExcludeNoMatchThreshold = 100;
     this.baseLeaders = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
@@ -137,38 +138,64 @@ export class LeadLagPaperStrategy {
     return list.includes(src);
   }
 
+  _pairKey(a, b) {
+    return [a, b].sort().join("#");
+  }
+
   _updateNoMatchCounters(pairs = []) {
     const series = (Array.isArray(this.feed.listSeries?.()) ? this.feed.listSeries() : [])
       .filter((x) => this.allowedSources.has(String(x?.source || "").toUpperCase()));
     if (!series.length) return;
-    const leadersHit = new Set();
-    const followersHit = new Set();
+
+    const valid = new Set();
+    const matched = new Set();
     for (const p of pairs) {
-      const leaderBase = this._symbolBase(p.leaderBase || p.leader);
-      const followerBase = this._symbolBase(p.followerBase || p.follower);
-      const leaderSource = String(p.leaderSource || "BT").toUpperCase();
-      const followerSource = String(p.followerSource || "BT").toUpperCase();
-      leadersHit.add(`${String(leaderBase || "").toUpperCase()}|${leaderSource}`);
-      followersHit.add(`${String(followerBase || "").toUpperCase()}|${followerSource}`);
+      const leader = `${String(this._symbolBase(p.leaderBase || p.leader) || "").toUpperCase()}|${String(p.leaderSource || "BT").toUpperCase()}`;
+      const follower = `${String(this._symbolBase(p.followerBase || p.follower) || "").toUpperCase()}|${String(p.followerSource || "BT").toUpperCase()}`;
+      if (!leader || !follower || leader === follower) continue;
+      const pk = this._pairKey(leader, follower);
+      valid.add(pk);
+      if (Number(p.confirmScore || p.confirm || 1) > 0) matched.add(pk);
     }
-    for (const s of series) {
-      const symbol = String(s?.symbol || "").toUpperCase();
-      const source = String(s?.source || "BT").toUpperCase();
-      const key = `${symbol}|${source}`;
-      const noMatchLeader = leadersHit.has(key) ? 0 : (this.noMatchAsLeaderCount.get(key) || 0) + 1;
-      const noMatchFollower = followersHit.has(key) ? 0 : (this.noMatchAsFollowerCount.get(key) || 0) + 1;
-      this.noMatchAsLeaderCount.set(key, noMatchLeader);
-      this.noMatchAsFollowerCount.set(key, noMatchFollower);
+
+    const keys = series.map((s) => `${String(s?.symbol || "").toUpperCase()}|${String(s?.source || "BT").toUpperCase()}`);
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = i + 1; j < keys.length; j++) {
+        const pk = this._pairKey(keys[i], keys[j]);
+        if (!valid.has(pk)) continue;
+        if (matched.has(pk)) this.noMatchPairCount.set(pk, 0);
+        else this.noMatchPairCount.set(pk, Number(this.noMatchPairCount.get(pk) || 0) + 1);
+      }
+    }
+
+    for (const key of keys) {
+      const [symbol, source] = key.split("|");
       if (this.baseLeaders.has(symbol)) continue;
       if (this.autoExcludedSeries.has(key)) continue;
-      if (noMatchLeader >= this.autoExcludeNoMatchThreshold && noMatchFollower >= this.autoExcludeNoMatchThreshold) {
+      let minNoMatch = Infinity;
+      let worstKey = null;
+      for (const other of keys) {
+        if (other === key) continue;
+        const pk = this._pairKey(key, other);
+        const cnt = Number(this.noMatchPairCount.get(pk) || 0);
+        if (cnt < minNoMatch) {
+          minNoMatch = cnt;
+          worstKey = other;
+        }
+      }
+      if (!Number.isFinite(minNoMatch)) continue;
+      this.noMatchAsLeaderCount.set(key, minNoMatch);
+      this.noMatchAsFollowerCount.set(key, minNoMatch);
+      if (minNoMatch >= this.autoExcludeNoMatchThreshold) {
         this.autoExcludedSeries.add(key);
         this.onAutoExclude?.({
           symbol,
           source,
-          reason: "no_match_100",
-          noMatchAsLeaderCount: noMatchLeader,
-          noMatchAsFollowerCount: noMatchFollower,
+          reason: "no_match_pairwise",
+          minNoMatch,
+          worstCounterpart: worstKey,
+          noMatchAsLeaderCount: minNoMatch,
+          noMatchAsFollowerCount: minNoMatch,
           threshold: this.autoExcludeNoMatchThreshold,
           presetName: this.currentPresetName || null,
         });

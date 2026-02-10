@@ -135,6 +135,9 @@ import { SymbolUniverse } from "./src/utils/symbolUniverse.js";
 import { PaperTestRunner } from "./src/paper/paperTestRunner.js";
 import { LeadLagLiveTrader } from "./src/trading/leadLagLiveTrader.js";
 import { RangeMetricsRunner } from "./src/rangeMetricsIntraday/rangeRunner.js";
+import { BoundaryFlipBotRunner } from "./src/bots/boundaryFlipBot/runner.js";
+import { BoundaryExecutorAdapter } from "./src/bots/boundaryFlipBot/executorAdapter.js";
+import { CycleTracker } from "./src/bots/boundaryFlipBot/cycleTracker.js";
 
 const PORT = process.env.PORT || 8080;
 const BYBIT_CFG = resolveBybitConfig();
@@ -376,7 +379,7 @@ function startMetricsTicker(ctx, feed, hub, leadLag, priv, trade, risk, paper, s
 }
 
 
-function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader, rangeRunner }) {
+function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader, rangeRunner, boundaryFlipBot }) {
 
   // Step 14: order timeout cancels (best-effort)
   const _orderTimeouts = new Map(); // orderId -> timeoutId
@@ -972,14 +975,13 @@ async startPaperTest(payload) {
   const presets = Array.isArray(payload?.presets) ? payload.presets : null;
   const multiStrategy = !!payload?.multiStrategy;
   const exploitBest = !!payload?.exploitBest;
-  const isolatedPresetName = payload?.testOnlyPresetName ? String(payload.testOnlyPresetName) : (payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null);
+  const isolatedPresetName = payload?.testOnlyPresetName ? String(payload.testOnlyPresetName) : null;
   const autoTune = payload?.autoTune !== false;
-  const autoTuneConfig = payload?.autoTuneConfig || {};
   const useBybit = payload?.useBybit !== false;
   const useBinance = payload?.useBinance !== false;
 
   Promise.resolve().then(async () => {
-    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, autoTune, autoTuneConfig, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
+    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, autoTune, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
     hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   }).catch((e) => {
     logger?.log("paper_test_start_error", { error: String(e?.message || e) });
@@ -1024,6 +1026,21 @@ async setRangeMetricsConfig(payload = {}) {
 
 async getRangeMetricsCandidates() {
   return { candidates: rangeRunner.getCandidates() };
+},
+
+async startBoundaryFlipBot(payload = {}) {
+  Promise.resolve().then(async () => {
+    await boundaryFlipBot.start(payload || {});
+  }).catch((e) => logger?.log("boundary_flip_start_err", { error: e?.message || String(e) }));
+  return { ok: true, queued: true };
+},
+
+async stopBoundaryFlipBot() {
+  return { ok: true, status: boundaryFlipBot.stop() };
+},
+
+async getBoundaryFlipBotStatus() {
+  return boundaryFlipBot.getStatus();
 },
 
 async listPresets() {
@@ -1105,6 +1122,9 @@ const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hu
   const instruments = { normalizeQty };
   const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, instruments, logger });
   const rangeRunner = new RangeMetricsRunner({ feed, rest, hub, logger, risk });
+  const boundaryExecutor = new BoundaryExecutorAdapter({ rest, logger });
+  const boundaryTracker = new CycleTracker({ rest, executor: boundaryExecutor, logger });
+  const boundaryFlipBot = new BoundaryFlipBotRunner({ hub, logger, executor: boundaryExecutor, tracker: boundaryTracker });
 
   (async () => {
     try {
@@ -1122,7 +1142,7 @@ const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hu
   strat.start(); // timer
   // strat.enable(false) by default
 
-  const handlers = makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader, rangeRunner });
+  const handlers = makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger, rest, liveTrader, rangeRunner, boundaryFlipBot });
 
 
 // Step 15: keep TradeState in sync even when private WS lags (demo env)

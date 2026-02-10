@@ -28,6 +28,9 @@ export class LeadLagPaperStrategy {
     this.entryStrictness = 65;
     this.fixedLeaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     this.blacklistSymbols = new Set();
+    this.blacklistBySource = new Map();
+    this.attemptsBySymbol = new Map();
+    this.onAutoExclude = null;
 
     this._timer = null;
     this._lastLeaderBarT = null;
@@ -63,6 +66,16 @@ export class LeadLagPaperStrategy {
     if (p.name != null) this.currentPresetName = String(p.name);
     if (Array.isArray(p.fixedLeaders)) this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase());
     if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
+    if (Array.isArray(p.blacklist)) {
+      this.blacklistSymbols = new Set();
+      this.blacklistBySource = new Map();
+      for (const b of p.blacklist) {
+        const sym = String(b?.symbol || "").toUpperCase();
+        if (!sym) continue;
+        this.blacklistSymbols.add(sym);
+        this.blacklistBySource.set(sym, Array.isArray(b?.sources) ? b.sources.map((x) => String(x).toUpperCase()) : []);
+      }
+    }
 
     this.logger?.log("paper_params", this.getParams());
   }
@@ -90,7 +103,27 @@ export class LeadLagPaperStrategy {
       currentPresetName: this.currentPresetName,
       fixedLeaders: this.fixedLeaders,
       blacklistSymbols: Array.from(this.blacklistSymbols),
+      blacklist: Array.from(this.blacklistSymbols).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
     };
+  }
+
+
+  _symbolBase(v) {
+    const raw = String(v || "");
+    return raw.includes("|") ? raw.split("|")[0] : raw;
+  }
+
+  _countAttemptFor(symbol, reason = "") {
+    const s = String(symbol || "").toUpperCase();
+    if (!s) return;
+    const next = (this.attemptsBySymbol.get(s) || 0) + 1;
+    this.attemptsBySymbol.set(s, next);
+    if (next < 500 || this.blacklistSymbols.has(s)) return;
+
+    const sources = this.feed?.getSymbolSources?.(s) || [];
+    this.blacklistSymbols.add(s);
+    this.blacklistBySource.set(s, sources);
+    this.onAutoExclude?.({ symbol: s, sources, attempts: next, reason: reason || "500_attempts_no_trade", presetName: this.currentPresetName || null });
   }
 
   _strictFactor() {
@@ -190,10 +223,14 @@ export class LeadLagPaperStrategy {
     if (!this.feed?.running) return;
     if (this.broker.position) return;
 
-    const pairs = this.leadLag.latest?.pairs || [];
-    const top = pairs.find((p) => this.fixedLeaders.includes(String(p.leader || "").toUpperCase()) && !this.blacklistSymbols.has(String(p.follower || "").toUpperCase()));
-    const topLeader = top?.leader;
-    const topFollower = top?.follower;
+    const pairs = (this.leadLag.latest?.pairs || []).slice(0, 10);
+    const top = pairs.find((p) => {
+      const leaderBase = this._symbolBase(p.leaderBase || p.leader);
+      const followerBase = this._symbolBase(p.followerBase || p.follower);
+      return this.fixedLeaders.includes(String(leaderBase || "").toUpperCase()) && !this.blacklistSymbols.has(String(followerBase || "").toUpperCase());
+    });
+    const topLeader = this._symbolBase(top?.leaderBase || top?.leader);
+    const topFollower = this._symbolBase(top?.followerBase || top?.follower);
     if (this._pendingSetup && (!top || this._pendingSetup.leader !== topLeader || this._pendingSetup.follower !== topFollower)) {
       this._clearPendingSetup("pair_changed");
     }
@@ -225,12 +262,14 @@ export class LeadLagPaperStrategy {
     const effMinCorr = this.minCorr * strictFactor;
     if (top.corr == null || top.corr < effMinCorr) {
       this._countReject("corrFail", "Жду корреляцию…");
+      this._countAttemptFor(follower, "corr");
       this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: effMinCorr, baseMinCorr: this.minCorr, entryStrictness: this.entryStrictness }, "skip:corr");
       return;
     }
 
-    const leader = top.leader;
-    const follower = top.follower;
+    const leader = this._symbolBase(top.leaderBase || top.leader);
+    const follower = this._symbolBase(top.followerBase || top.follower);
+    const followerSource = String(top.followerSource || "BT").toUpperCase();
 
     const leaderBars = this.feed.getBars(leader, 2);
     if (!leaderBars.length) return;
@@ -251,6 +290,7 @@ export class LeadLagPaperStrategy {
     const thr = this.impulseZ * strictFactor * leaderVol;
     if (!this._pendingSetup && Math.abs(lastR) < thr) {
       this._countReject("impulseFail", "Жду импульс…");
+      this._countAttemptFor(follower, "impulse");
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
       return;
     }
@@ -269,6 +309,7 @@ export class LeadLagPaperStrategy {
       const edgeGateR = costsR * this.edgeMult * strictFactor;
       if (tpR2 < edgeGateR) {
         this._countReject("edgeGateFail", "Edge gate блокирует вход…");
+        this._countAttemptFor(follower, "edge");
         this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, tpR2, edgeGateR, costsR, edgeMult: this.edgeMult }, `gate:edge:${leader}:${follower}`);
         return;
       }
@@ -351,6 +392,7 @@ export class LeadLagPaperStrategy {
         meta: {
           leader: setup.leader,
           follower: setup.follower,
+          followerSource,
           corr: setup.corr,
           bestLagBars: setup.bestLagBars,
           lagMs: setup.bestLagMs,

@@ -26,7 +26,7 @@ export function HedgePage() {
     return () => clearInterval(t);
   }, []);
 
-  const bars = app.bars[symbol] || [];
+  const bars = app.bars[`${symbol}|BT`] || app.bars[`${symbol}|BNB`] || [];
   const stats = useMemo(() => {
     const v = bars.map((b) => Number(b.mid || b.close || 0)).filter(Boolean);
     if (!v.length) return null;

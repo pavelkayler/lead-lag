@@ -16,6 +16,7 @@ export class FeedManager {
     const cfg = resolveBybitConfig();
 
     this.wsUrl = wsUrl || process.env.BYBIT_PUBLIC_WS_URL || cfg.wsPublicUrl;
+    this.binanceWsUrl = process.env.BINANCE_SPOT_WS_URL || "wss://stream.binance.com:9443/ws/!bookTicker";
 
     // Public REST (no auth) used as a sanity reference for prices (helps detect rare WS scale glitches)
     this.publicHttpBaseUrl = process.env.BYBIT_PUBLIC_HTTP_URL || "https://api.bybit.com";
@@ -25,19 +26,25 @@ export class FeedManager {
     this.symbols = [];
     this.running = false;
 
-    this.state = new Map(); // symbol -> { mid, prevBarMid, lastTickRecvTs, lastTickExchTs, lastTickLoggedTs }
-    this.bars = new Map();  // symbol -> RingBuffer
+    this.state = new Map(); // key(symbol|source) -> { mid, prevBarMid, lastTickRecvTs, lastTickExchTs, lastTickLoggedTs }
+    this.bars = new Map();  // key(symbol|source) -> RingBuffer
 
     this._barTimer = null;
 
     this._ws = null;
+    this._bnWs = null;
     this._wsPingTimer = null;
+    this._bnWsPingTimer = null;
     this._reconnectTimer = null;
+    this._bnReconnectTimer = null;
     this._reconnectDelayMs = 500;
+    this._bnReconnectDelayMs = 500;
     this._subscribedTopics = new Set();
 
     this.reconnects = 0;
+    this.binanceReconnects = 0;
     this.lastWsMsgRecvTs = null;
+    this.lastBnWsMsgRecvTs = null;
     this.lastWsOpenTs = null;
     this.lastWsCloseTs = null;
 
@@ -83,14 +90,33 @@ export class FeedManager {
     return !!(this._ws && this._ws.readyState === WebSocket.OPEN);
   }
 
+  isBinanceWsUp() {
+    return !!(this._bnWs && this._bnWs.readyState === WebSocket.OPEN);
+  }
+
+  _seriesKey(symbol, source = "BT") {
+    return `${String(symbol || "").toUpperCase()}|${String(source || "BT").toUpperCase()}`;
+  }
+
+  _ensureSeries(symbol, source = "BT") {
+    const key = this._seriesKey(symbol, source);
+    if (!this.state.has(key)) this.state.set(key, { mid: null, prevBarMid: null, lastTickRecvTs: null, lastTickExchTs: null, lastTickLoggedTs: 0 });
+    if (!this.bars.has(key)) this.bars.set(key, new RingBuffer(this.maxBars));
+    return key;
+  }
+
   getStats() {
     const now = Date.now();
     return {
       mode: this.mode,
       wsUp: this.isWsUp(),
+      binanceWsUp: this.isBinanceWsUp(),
       wsUrl: this.wsUrl,
+      binanceWsUrl: this.binanceWsUrl,
       reconnects: this.reconnects,
+      binanceReconnects: this.binanceReconnects,
       lastWsMsgAgeMs: this.lastWsMsgRecvTs ? (now - this.lastWsMsgRecvTs) : null,
+      lastBinanceWsMsgAgeMs: this.lastBnWsMsgRecvTs ? (now - this.lastBnWsMsgRecvTs) : null,
       barLatency: this._percentiles(this._barLatency),
       wsDelay: this._percentiles(this._wsDelay),
     };
@@ -101,11 +127,17 @@ export class FeedManager {
     this.symbols = uniq;
 
     for (const s of uniq) {
-      if (!this.state.has(s)) this.state.set(s, { mid: null, prevBarMid: null, lastTickRecvTs: null, lastTickExchTs: null, lastTickLoggedTs: 0 });
-      if (!this.bars.has(s)) this.bars.set(s, new RingBuffer(this.maxBars));
+      this._ensureSeries(s, "BT");
+      this._ensureSeries(s, "BNB");
     }
-    for (const s of [...this.state.keys()]) if (!uniq.includes(s)) this.state.delete(s);
-    for (const s of [...this.bars.keys()]) if (!uniq.includes(s)) this.bars.delete(s);
+    for (const k of [...this.state.keys()]) {
+      const [sym] = String(k).split("|");
+      if (!uniq.includes(sym)) this.state.delete(k);
+    }
+    for (const k of [...this.bars.keys()]) {
+      const [sym] = String(k).split("|");
+      if (!uniq.includes(sym)) this.bars.delete(k);
+    }
 
     this._syncSubscriptions();
     this.logger?.log("symbols", { symbols: this.symbols });
@@ -116,7 +148,10 @@ export class FeedManager {
     this.running = true;
     this.mode = ws ? "ws" : "replay";
 
-    if (ws) this._connectWs();
+    if (ws) {
+      this._connectWs();
+      this._connectBinanceWs();
+    }
     this._barTimer = setInterval(() => this._onBar(), this.barMs);
     this._barTimer.unref?.();
 
@@ -136,17 +171,18 @@ export class FeedManager {
     this._barTimer = null;
 
     this._cleanupWs(true);
+    this._cleanupBinanceWs();
     this.logger?.log("feed_stop", {});
   }
 
-  getBars(symbol, n) {
-    const rb = this.bars.get(symbol);
+  getBars(symbol, n, source = "BT") {
+    const rb = this.bars.get(this._seriesKey(symbol, source));
     if (!rb) return [];
     return rb.tail(n);
   }
 
-  getMid(symbol) {
-    const st = this.state.get(symbol);
+  getMid(symbol, source = "BT") {
+    const st = this.state.get(this._seriesKey(symbol, source));
     let mid = st?.mid;
 
     // REST reference (best-effort) to correct scale issues even when mark/index are missing
@@ -170,6 +206,27 @@ export class FeedManager {
     return rs;
   }
 
+  getSymbolSources(symbol) {
+    const out = [];
+    for (const src of ["BT", "BNB"]) {
+      const st = this.state.get(this._seriesKey(symbol, src));
+      if (Number.isFinite(st?.mid)) out.push(src);
+    }
+    return out;
+  }
+
+  listSeries() {
+    const all = [];
+    for (const symbol of this.symbols) {
+      for (const source of ["BT", "BNB"]) {
+        const st = this.state.get(this._seriesKey(symbol, source));
+        if (!st || !Number.isFinite(st.mid)) continue;
+        all.push({ symbol, source, key: this._seriesKey(symbol, source) });
+      }
+    }
+    return all;
+  }
+
 
   /**
    * ingestMid()
@@ -182,7 +239,8 @@ export class FeedManager {
     if (!s) return;
     if (!Number.isFinite(m) || m <= 0) return;
 
-    const st = this.state.get(s);
+    const src = String(source || "BT").toUpperCase();
+    const st = this.state.get(this._seriesKey(s, src));
     if (!st) return;
 
     st.mid = m;
@@ -190,7 +248,7 @@ export class FeedManager {
     st.lastTickExchTs = (exchTs != null && Number.isFinite(Number(exchTs))) ? Number(exchTs) : null;
 
     // do not try to normalize scale here (replay file already stored mids). getMid() will still apply restRef scaling if enabled.
-    this.broadcast("price", { ts: recvTs, t: recvTs, symbol: s, mid: m, exchTs: st.lastTickExchTs, source });
+    this.broadcast("price", { ts: recvTs, t: recvTs, symbol: s, source: src, mid: m, exchTs: st.lastTickExchTs });
 
     // latency sample (treat like wsDelay)
     if (this.logger) {
@@ -245,9 +303,9 @@ export class FeedManager {
       const exchTs = Number(msg.ts ?? NaN);
       const data = msg.data;
       if (Array.isArray(data)) {
-        for (const d of data) this._applyTicker(topic, d, exchTs);
+        for (const d of data) this._applyTicker(topic, d, exchTs, "BT");
       } else if (data) {
-        this._applyTicker(topic, data, exchTs);
+        this._applyTicker(topic, data, exchTs, "BT");
       }
     });
 
@@ -264,6 +322,52 @@ export class FeedManager {
 
     this._ws.on("close", () => onDown("close"));
     this._ws.on("error", (e) => onDown(e?.message || "error"));
+  }
+
+  _connectBinanceWs() {
+    if (!this.running) return;
+    if (this._bnWs && (this._bnWs.readyState === WebSocket.OPEN || this._bnWs.readyState === WebSocket.CONNECTING)) return;
+    this._bnWs = new WebSocket(this.binanceWsUrl);
+
+    this._bnWs.on("open", () => {
+      this._bnReconnectDelayMs = 500;
+      this.logger?.log("bn_ws_state", { state: "open", url: this.binanceWsUrl });
+      this._bnWsPingTimer = setInterval(() => {
+        if (this._bnWs?.readyState === WebSocket.OPEN) {
+          try { this._bnWs.ping(); } catch {}
+        }
+      }, 20000);
+      this._bnWsPingTimer.unref?.();
+    });
+
+    this._bnWs.on("message", (raw) => {
+      this.lastBnWsMsgRecvTs = Date.now();
+      let msg;
+      try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
+      const symbol = String(msg?.s || "").toUpperCase();
+      if (!symbol || !symbol.endsWith("USDT") || !this.symbols.includes(symbol)) return;
+      const bid = Number(msg?.b);
+      const ask = Number(msg?.a);
+      this._applyTicker(`bookTicker.${symbol}`, { symbol, bid1Price: bid, ask1Price: ask }, Number(msg?.E || NaN), "BNB");
+    });
+
+    const onDown = (why) => {
+      this.logger?.log("bn_ws_state", { state: "down", why: String(why || ""), url: this.binanceWsUrl });
+      this._cleanupBinanceWs();
+      if (!this.running) return;
+      this.binanceReconnects++;
+      if (this._bnReconnectTimer) return;
+      const delay = Math.min(15000, this._bnReconnectDelayMs);
+      this._bnReconnectDelayMs = Math.min(15000, this._bnReconnectDelayMs * 2);
+      this._bnReconnectTimer = setTimeout(() => {
+        this._bnReconnectTimer = null;
+        this._connectBinanceWs();
+      }, delay);
+      this._bnReconnectTimer.unref?.();
+    };
+
+    this._bnWs.on("close", () => onDown("close"));
+    this._bnWs.on("error", (e) => onDown(e?.message || "error"));
   }
 
 
@@ -285,7 +389,7 @@ export class FeedManager {
     return mid;
   }
 
-  _applyTicker(topic, d, exchTs) {
+  _applyTicker(topic, d, exchTs, source = "BT") {
     const symbol = d?.symbol || topic.split(".")[1];
     if (!symbol) return;
 
@@ -309,7 +413,7 @@ export class FeedManager {
     const restRef = rr?.last || rr?.mark || rr?.index || null;
     if (restRef) mid = this._normalizeScale(mid, restRef);
 
-    const st = this.state.get(symbol);
+    const st = this.state.get(this._seriesKey(symbol, source));
     if (!st) return;
 
     const recvTs = Date.now();
@@ -317,13 +421,13 @@ export class FeedManager {
     st.lastTickRecvTs = recvTs;
     st.lastTickExchTs = Number.isFinite(exchTs) ? exchTs : null;
 
-    this.broadcast("price", { ts: recvTs, t: recvTs, symbol, mid, exchTs });
+    this.broadcast("price", { ts: recvTs, t: recvTs, symbol, source, mid, bid: Number.isFinite(bid) ? bid : undefined, ask: Number.isFinite(ask) ? ask : undefined, exchTs });
 
     if (this.logger) {
       if ((recvTs - (st.lastTickLoggedTs || 0)) >= this.tickLogSampleMs) {
         st.lastTickLoggedTs = recvTs;
         const wsDelayMs = (st.lastTickExchTs != null) ? (recvTs - st.lastTickExchTs) : null;
-        this.logger.log("tick_sample", { symbol, mid, recvTs, exchTs: st.lastTickExchTs, wsDelayMs });
+        this.logger.log("tick_sample", { symbol, source, mid, recvTs, exchTs: st.lastTickExchTs, wsDelayMs });
       }
     }
   }
@@ -355,6 +459,21 @@ export class FeedManager {
       this._ws = null;
     }
     if (clearSubs) this._subscribedTopics.clear();
+  }
+
+  _cleanupBinanceWs() {
+    if (this._bnReconnectTimer) {
+      clearTimeout(this._bnReconnectTimer);
+      this._bnReconnectTimer = null;
+    }
+    if (this._bnWsPingTimer) {
+      clearInterval(this._bnWsPingTimer);
+      this._bnWsPingTimer = null;
+    }
+    if (this._bnWs) {
+      try { this._bnWs.close(); } catch {}
+      this._bnWs = null;
+    }
   }
 
   _syncSubscriptions(full = false) {
@@ -409,8 +528,9 @@ export class FeedManager {
     const now = Date.now();
 
     for (const s of this.symbols) {
-      const st = this.state.get(s);
-      const rb = this.bars.get(s);
+      for (const source of ["BT", "BNB"]) {
+      const st = this.state.get(this._seriesKey(s, source));
+      const rb = this.bars.get(this._seriesKey(s, source));
       if (!st || !rb) continue;
 
       const mid = st.mid;
@@ -419,7 +539,7 @@ export class FeedManager {
       const prev = st.prevBarMid;
       const r = (prev && prev > 0) ? Math.log(mid / prev) : 0;
 
-      const bar = { ts: now, t: now, symbol: s, mid, r };
+      const bar = { ts: now, t: now, symbol: s, source, mid, r };
       rb.push(bar);
       st.prevBarMid = mid;
 
@@ -433,7 +553,8 @@ export class FeedManager {
       }
 
       this.broadcast("bar", bar);
-      this.logger?.log("bar", { symbol: s, t: now, mid, r });
+      this.logger?.log("bar", { symbol: s, source, t: now, mid, r });
+      }
     }
   }
 }

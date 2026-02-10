@@ -20,7 +20,23 @@ const DEFAULT_PRESET = {
   cooldownBars: 20,
   entryStrictness: 65,
   blacklistSymbols: [],
+  blacklist: [],
 };
+
+
+function normalizeBlacklist(preset = {}) {
+  const old = Array.isArray(preset.blacklistSymbols) ? preset.blacklistSymbols : [];
+  const next = Array.isArray(preset.blacklist) ? preset.blacklist : old.map((symbol) => ({ symbol, sources: [] }));
+  return next
+    .map((x) => ({
+      symbol: String(x?.symbol || x || "").toUpperCase(),
+      sources: Array.isArray(x?.sources) ? x.sources.map((z) => String(z).toUpperCase()) : [],
+      reason: x?.reason || undefined,
+      excludedAt: Number(x?.excludedAt) || undefined,
+      attempts: Number(x?.attempts) || undefined,
+    }))
+    .filter((x) => x.symbol);
+}
 
 const DEFAULT_PRESETS = [
   DEFAULT_PRESET,
@@ -58,7 +74,7 @@ export class PaperTestRunner {
     try {
       if (fs.existsSync(this.presetsPath)) {
         const saved = JSON.parse(fs.readFileSync(this.presetsPath, "utf8"));
-        if (Array.isArray(saved) && saved.length) this.presetsCatalog = saved;
+        if (Array.isArray(saved) && saved.length) this.presetsCatalog = saved.map((p) => ({ ...p, blacklist: normalizeBlacklist(p), blacklistSymbols: normalizeBlacklist(p).map((x) => x.symbol) }));
       }
     } catch {}
   }
@@ -215,7 +231,7 @@ export class PaperTestRunner {
     const parts = Object.entries(counters).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} (x${v})`);
     const sample = this.instances.size ? Array.from(this.instances.values())[0]?.strategy : this.strategy;
     const p = sample?.getParams?.() || {};
-    this.advisor.logEvent("wait", `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}`);
+    this.advisor.logEvent("wait", `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}. Следующий шаг: ждём подтверждённый импульс лидера и сигнал фолловера.`);
     if ((now - this.lastStrictnessTuneAt) > 30_000) {
       this.lastStrictnessTuneAt = now;
       const targets = this.instances.size ? Array.from(this.instances.values()) : [{ strategy: this.strategy, preset: this.status.currentPreset || this.presetsCatalog[0] }];
@@ -241,11 +257,14 @@ export class PaperTestRunner {
 
 
   _persistPresets() {
-    try { fs.writeFileSync(this.presetsPath, JSON.stringify(this.presetsCatalog, null, 2)); } catch {}
+    try {
+      const payload = this.presetsCatalog.map((p) => ({ ...p, blacklist: normalizeBlacklist(p), blacklistSymbols: normalizeBlacklist(p).map((x) => x.symbol) }));
+      fs.writeFileSync(this.presetsPath, JSON.stringify(payload, null, 2));
+    } catch {}
   }
 
   listPresets() {
-    return clone(this.presetsCatalog);
+    return clone(this.presetsCatalog.map((p) => ({ ...p, blacklist: normalizeBlacklist(p), blacklistSymbols: normalizeBlacklist(p).map((x) => x.symbol) })));
   }
 
   _updatePresetStats() {
@@ -262,7 +281,8 @@ export class PaperTestRunner {
   upsertPreset(preset = {}) {
     const name = String(preset?.name || "").trim();
     if (!name) throw new Error("preset.name required");
-    const next = { ...clone(DEFAULT_PRESET), ...clone(preset), name };
+    const blacklist = normalizeBlacklist(preset);
+    const next = { ...clone(DEFAULT_PRESET), ...clone(preset), name, blacklist, blacklistSymbols: blacklist.map((x) => x.symbol) };
     const idx = this.presetsCatalog.findIndex((p) => p.name === name);
     if (idx >= 0) this.presetsCatalog[idx] = next;
     else this.presetsCatalog.push(next);
@@ -299,12 +319,12 @@ export class PaperTestRunner {
 
     if (autoTune) {
       usePresets = usePresets.map((preset) => {
-        const stamp = new Date(startedAt).toISOString().slice(0, 16).replace("T", " ");
-        const cloneName = `${preset.name} @ ${stamp}`;
-        const cloned = { ...preset, name: cloneName, blacklistSymbols: [...(preset.blacklistSymbols || [])] };
+        const cloneName = `${preset.name} @ WORKING`;
+        const existing = this.presetsCatalog.find((x) => x.name === cloneName);
+        const cloned = existing ? { ...existing } : { ...preset, name: cloneName, blacklist: normalizeBlacklist(preset), blacklistSymbols: normalizeBlacklist(preset).map((x) => x.symbol) };
         this.upsertPreset(cloned);
         this.sessionWorkingPreset.set(preset.name, cloneName);
-        this.advisor.logEvent("auto-tune", `Создан рабочий пресет ${cloneName} из ${preset.name}.`);
+        this.advisor.logEvent("auto-tune", `Рабочий пресет: ${cloneName}.`);
         return cloned;
       });
     }
@@ -316,7 +336,7 @@ export class PaperTestRunner {
     } catch {
       symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"].slice(0, Math.max(1, Number(symbolsCount) || 5));
     }
-    this.feed.setSymbols(symbols.slice(0, 300));
+    this.feed.setSymbols(symbols.slice(0, 100));
     if (!this.feed.running) this.feed.start();
 
     this.broker.reset();
@@ -327,6 +347,7 @@ export class PaperTestRunner {
         const broker = new PaperBroker({ logger: this.logger });
         const strategy = new LeadLagPaperStrategy({ feed: this.feed, leadLag: this.leadLag, broker, hub: this.hub, logger: this.logger });
         strategy.setParams({ ...preset, enabled: true, name: preset.name, fixedLeaders: ["BTCUSDT","ETHUSDT","SOLUSDT"] });
+        strategy.onAutoExclude = (ev) => this._handleAutoExclude(ev);
         strategy.enable(true);
         strategy.start();
         this.instances.set(preset.name, { broker, strategy, preset });
@@ -334,6 +355,7 @@ export class PaperTestRunner {
     } else {
       this.instances.clear();
       this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name, fixedLeaders: ["BTCUSDT","ETHUSDT","SOLUSDT"] });
+      this.strategy.onAutoExclude = (ev) => this._handleAutoExclude(ev);
       this.strategy.enable(true);
     }
 
@@ -342,7 +364,7 @@ export class PaperTestRunner {
       runId,
       startedAt,
       endsAt: null,
-      symbols: symbols.slice(0, 300),
+      symbols: symbols.slice(0, 100),
       presets: usePresets,
       currentPreset: usePresets[0],
       presetsByHour: [],
@@ -456,6 +478,24 @@ export class PaperTestRunner {
     })();
 
     return this.getStatus();
+  }
+
+
+  _handleAutoExclude(ev = {}) {
+    const presetName = String(ev.presetName || this.status.currentPreset?.name || "");
+    const symbol = String(ev.symbol || "").toUpperCase();
+    if (!symbol || !presetName) return;
+    const preset = this.presetsCatalog.find((x) => x.name === presetName);
+    if (!preset) return;
+    const sources = Array.isArray(ev.sources) ? ev.sources : [];
+    const blacklist = normalizeBlacklist(preset);
+    if (!blacklist.find((x) => x.symbol === symbol)) {
+      blacklist.push({ symbol, sources, reason: ev.reason, attempts: ev.attempts, excludedAt: Date.now() });
+      this.upsertPreset({ ...preset, blacklist, blacklistSymbols: blacklist.map((x) => x.symbol) });
+      this.advisor.logEvent("exclude", `[EXCLUDE] Исключил ${symbol} [${sources.join(",") || "-"}]: 500 попыток без сделок`);
+      this.status.presets = this.listPresets();
+      this._broadcast();
+    }
   }
 
   async stop(reason = "user") {

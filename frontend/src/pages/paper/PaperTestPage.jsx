@@ -35,7 +35,7 @@ export function PaperTestPage() {
   const learning = app.paperTest?.learning || {};
   const summary = app.paperTest?.summary || {};
   const learningState = learning.state || app.paperTest?.state || "STOPPED";
-  const isRunning = learningState !== "STOPPED";
+  const isRunning = learningState === "RUNNING" || learningState === "RUNNING_WAITING" || learningState === "RUNNING_IN_TRADE";
 
   const startedAt = Number(summary.startedAt || app.paperTest?.startedAt || 0);
   const endsAt = Number(summary.endsAt || app.paperTest?.endsAt || 0);
@@ -49,7 +49,7 @@ export function PaperTestPage() {
   const start = async () => {
     const single = presets.find((p) => p.name === isolatedPresetName);
     const presetsPayload = multiStrategy ? selectedPresets : (single ? [single] : []);
-    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 300, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName });
+    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName });
     if (res?.queued) setShowToast(true);
   };
 
@@ -93,7 +93,7 @@ export function PaperTestPage() {
         <div className="small mb-1">Тест: <b>{isRunning ? "запущен" : "остановлен"}</b> • Статус: <b>{learningState}</b></div>
         <ProgressBar className="mb-2" striped={learningState === "RUNNING_WAITING"} animated={learningState === "RUNNING_WAITING"} variant={learningState === "RUNNING_IN_TRADE" ? "success" : "info"} now={learningState === "RUNNING_IN_TRADE" ? 100 : (isRunning ? 50 : 0)} />
         <div style={{ height: 220, minHeight: 220, resize: "vertical", overflowY: "auto", border: "1px solid rgba(0,0,0,0.1)", borderRadius: 8, padding: 8, background: "#fff" }}>
-          {(learning.log || []).length ? (learning.log || []).map((line, idx) => <div className="small" key={idx}>{line}</div>) : <div className="small text-muted">Лог пока пуст.</div>}
+          {(learning.log || []).length ? (learning.log || []).slice().reverse().map((line, idx) => <div className="small" key={idx}>{line}</div>) : <div className="small text-muted">Лог пока пуст.</div>}
         </div>
       </Card></Col>
 

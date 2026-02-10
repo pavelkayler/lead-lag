@@ -5,10 +5,25 @@ const DEFAULT_WS_URL = "ws://localhost:8080";
 
 function makeId(type) { return `${type}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`; }
 
+const ROUTE_TOPICS = {
+  "/": ["price", "leadlag", "metrics"],
+  "/paper": ["paperTest"],
+  "/hedge": ["tradeState", "bar"],
+  "/demo": ["tradeState", "price"],
+  "/real": ["tradeState", "price"],
+  "/presets": [],
+};
+
+function topicsForPath(pathname = "/") {
+  return ROUTE_TOPICS[pathname] || [];
+}
+
+
 export function AppProviders({ children }) {
   const wsRef = useRef(null);
   const pendingRef = useRef(new Map());
   const pollRef = useRef(null);
+  const wsTopicsRef = useRef(new Set());
 
   const [wsUrl, setWsUrl] = useState(DEFAULT_WS_URL);
   const [status, setStatus] = useState("disconnected");
@@ -55,12 +70,12 @@ export function AppProviders({ children }) {
         setFeedMaxSymbols(st.feedMaxSymbols || 100);
         setSymbolsState(st.feed?.symbols || []);
         try { const p = await sendCommand("listPresets", {}); setPresets(p.presets || []); setPresetStats(p.presetStats || {}); } catch {}
-        for (const topic of ["price", "bar", "leadlag", "metrics", "tradeState", "paperTest"]) {
-          try { await sendCommand("subscribe", { topic }); } catch {}
+        for (const topic of topicsForPath(window.location.pathname || "/")) {
+          try { await sendCommand("subscribe", { topic }); wsTopicsRef.current.add(topic); } catch {}
         }
       } catch (e) { console.error("[ACTION] getStatus error", e); }
     };
-    ws.onclose = () => { setStatus("disconnected"); setClientId(null); };
+    ws.onclose = () => { setStatus("disconnected"); setClientId(null); wsTopicsRef.current.clear(); };
     ws.onerror = (e) => console.error("WS error", e);
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
@@ -74,13 +89,23 @@ export function AppProviders({ children }) {
       }
       if (msg.type !== "event") return;
       if (msg.topic === "hello") setClientId(msg.payload?.clientId || null);
-      if (msg.topic === "price" && activePath === "/") setPrices((prev) => ({ ...prev, [msg.payload.symbol]: msg.payload }));
-      if (msg.topic === "leadlag" && activePath === "/") setLeadlag(msg.payload?.top || []);
+      if (msg.topic === "price") {
+        const symbol = String(msg.payload?.symbol || "").toUpperCase();
+        const source = String(msg.payload?.source || "BT").toUpperCase();
+        if (!symbol) return;
+        setPrices((prev) => ({
+          ...prev,
+          [symbol]: { ...(prev[symbol] || {}), symbol, [source]: msg.payload },
+        }));
+      }
+      if (msg.topic === "leadlag") setLeadlag(msg.payload?.top || []);
       if (msg.topic === "metrics") setMetrics(msg.payload || null);
       if (msg.topic === "bar") {
-        const s = msg.payload?.symbol;
-        if (!s) return;
-        setBars((prev) => ({ ...prev, [s]: [...(prev[s] || []), msg.payload].slice(-480) }));
+        const symbol = String(msg.payload?.symbol || "").toUpperCase();
+        const source = String(msg.payload?.source || "BT").toUpperCase();
+        if (!symbol) return;
+        const key = `${symbol}|${source}`;
+        setBars((prev) => ({ ...prev, [key]: [...(prev[key] || []), msg.payload].slice(-480) }));
       }
       if (msg.topic === "paperTest") {
         setPaperTest(msg.payload);
@@ -138,7 +163,18 @@ export function AppProviders({ children }) {
   const closeAllPositions = () => action("closeAllPositions", () => sendCommand("closeAllPositions", {}));
   const createHedgeOrders = (payload) => action("createHedgeOrders", () => sendCommand("createHedgeOrders", payload));
   const getTradingStatus = () => action("getTradingStatus", () => sendCommand("getTradingStatus", {})).then((s) => (setTradingStatus(s), s));
-  const getTradeState = (opts = {}) => action("getTradeState", () => sendCommand("getTradeState", opts)).then((r) => { setTradeState(r); return r; });
+  const getTradeState = (opts = {}) => action("getTradeState", () => sendCommand("getTradeState", opts)).then((r) => {
+    const payload = r || {};
+    const normalizeOrder = (o = {}) => ({ ...o, linkId: o.linkId || o.orderLinkId || o.order_link_id || o.order_linkId || null, orderStatus: o.orderStatus || o.order_status || o.status || null });
+    setTradeState({
+      ...payload,
+      openOrders: (payload.openOrders || payload.orders || []).map(normalizeOrder),
+      orders: (payload.orders || payload.openOrders || []).map(normalizeOrder),
+      positions: payload.positions || [],
+      executions: payload.executions || [],
+    });
+    return r;
+  });
 
   const listPresets = () => action("listPresets", () => sendCommand("listPresets", {})).then((r) => { setPresets(r.presets || []); setPresetStats(r.presetStats || {}); return r; });
   const savePreset = (preset) => action("savePreset", () => sendCommand("savePreset", { preset })).then((r) => { setPresets(r.presets || []); return r; });
@@ -159,13 +195,36 @@ export function AppProviders({ children }) {
   }, []);
 
   useEffect(() => {
+    if (status !== "connected") return;
+    const desired = new Set(topicsForPath(activePath));
+    const current = wsTopicsRef.current;
+    for (const t of Array.from(current)) {
+      if (!desired.has(t)) {
+        sendCommand("unsubscribe", { topic: t }).catch(() => {});
+        current.delete(t);
+      }
+    }
+    for (const t of Array.from(desired)) {
+      if (!current.has(t)) {
+        sendCommand("subscribe", { topic: t }).catch(() => {});
+        current.add(t);
+      }
+    }
+  }, [status, activePath, sendCommand]);
+
+  useEffect(() => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       if (status !== "connected") return;
       try {
-        if (activePath !== "/paper") return;
-        const res = await fetch("http://localhost:8080/results/latest");
-        if (res.ok) setPaperTest(await res.json());
+        if (activePath === "/paper") {
+          const res = await fetch("http://localhost:8080/results/latest");
+          if (res.ok) setPaperTest(await res.json());
+          return;
+        }
+        if (["/hedge", "/demo", "/real"].includes(activePath)) {
+          await getTradeState({ maxOrders: 100, maxExecutions: 100 });
+        }
       } catch {}
     }, 10000);
     return () => clearInterval(pollRef.current);

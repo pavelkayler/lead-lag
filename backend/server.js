@@ -482,14 +482,14 @@ function makeHandlers({ hub, feed, leadLag, priv, trade, risk, paper, strat, tra
     },
 
     async getUniverseFromRating(payload = {}) {
-      const limit = Math.max(1, Math.min(300, Number(payload.limit) || 300));
+      const limit = Math.max(1, Math.min(100, Number(payload.limit) || 100));
       const minMarketCapUsd = Number(payload.minMarketCapUsd || 10_000_000);
       const symbols = await paperTest.cmc.getUniverseFromRating({ limit, minMarketCapUsd, listingsLimit: 500 });
       return { symbols, limit, minMarketCapUsd };
     },
 
     async getSymbolsFromRating(payload = {}) {
-      const limit = Math.max(1, Math.min(300, Number(payload.limit) || 300));
+      const limit = Math.max(1, Math.min(100, Number(payload.limit) || 100));
       const minCapUsd = Number(payload.minCapUsd || payload.minMarketCapUsd || 10_000_000);
       const symbols = await paperTest.cmc.getUniverseFromRating({ limit, minMarketCapUsd: minCapUsd, listingsLimit: 500 });
       return { symbols, limit, minCapUsd };
@@ -938,7 +938,9 @@ const estNotional = qty * mid;
         await tradeState.reconcile(rest, { positions: true, orders: true, wallet: false });
         hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 30 }));
       }).catch((e) => {
-        logger?.log("hedge_create_error", { symbol, groupId, error: String(e?.message || e) });
+        const error = String(e?.message || e);
+        logger?.log("hedge_create_error", { symbol, groupId, error });
+        hub.broadcast("hedge", { ts: Date.now(), groupId, symbol, error, hint: error.includes("10001") ? "position idx not match position mode" : undefined });
       });
 
       return { ok: true, queued: true, groupId };
@@ -962,7 +964,7 @@ const estNotional = qty * mid;
 async startPaperTest(payload) {
   const durationHours = Number(payload?.durationHours || 8);
   const rotateEveryMinutes = Number(payload?.rotateEveryMinutes || 60);
-  const symbolsCount = Number(payload?.symbolsCount || 300);
+  const symbolsCount = Number(payload?.symbolsCount || 100);
   const minMarketCapUsd = Number(payload?.minMarketCapUsd || 10_000_000);
   const presets = Array.isArray(payload?.presets) ? payload.presets : null;
   const multiStrategy = !!payload?.multiStrategy;
@@ -1126,6 +1128,17 @@ _tradeStatePollTimer.unref?.();
 
     sendEvent(ws, "hello", { clientId: ctx.clientId, serverTs: Date.now(), ua: ctx.userAgent });
     logger.log("ws_client", { op: "connect", clientId: ctx.clientId, ua: ctx.userAgent });
+
+    Promise.resolve().then(async () => {
+      try {
+        if (priv.getStats()?.authed) {
+          await tradeState.reconcile(rest, { positions: true, orders: true, wallet: true });
+          hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 30 }));
+        }
+      } catch (e) {
+        logger.log("trade_state_reconcile_on_connect_err", { error: e?.message || String(e) });
+      }
+    });
 
     const metricsTimer = startMetricsTicker(ctx, feed, hub, leadLag, priv, trade, risk, paper, strat, tradeState, paperTest, logger);
 

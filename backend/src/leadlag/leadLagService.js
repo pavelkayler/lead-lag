@@ -17,9 +17,20 @@ export class LeadLagService {
    */
   static toUi(res) {
     const pairs = Array.isArray(res?.pairs) ? res.pairs : [];
-    const mapped = pairs.map((p) => ({
-      leader: p?.leader,
-      follower: p?.follower,
+    const mapped = pairs.map((p) => {
+      const [leaderBase = p?.leader || "", leaderSource = "BT"] = String(p?.leader || "").split("|");
+      const [followerBase = p?.follower || "", followerSource = "BT"] = String(p?.follower || "").split("|");
+      const leaderDisplay = `${leaderBase} (${leaderSource})`;
+      const followerDisplay = `${followerBase} (${followerSource})`;
+      return {
+      leader: leaderDisplay,
+      follower: followerDisplay,
+      leaderBase,
+      followerBase,
+      leaderSource,
+      followerSource,
+      leaderDisplay,
+      followerDisplay,
       corr: typeof p?.corr === "number" ? p.corr : null,
       lagMs: typeof p?.bestLagMs === "number" ? p.bestLagMs : (typeof p?.lagMs === "number" ? p.lagMs : null),
       lagBars: typeof p?.bestLagBars === "number" ? p.bestLagBars : null,
@@ -28,7 +39,8 @@ export class LeadLagService {
       samples: typeof p?.samples === "number" ? p.samples : null,
       confirmScore: typeof p?.confirmScore === "number" ? p.confirmScore : null,
       confirmLabel: p?.confirmLabel || "NO_DATA",
-    }));
+    };
+    });
 
     return {
       ts: typeof res?.ts === "number" ? res.ts : Date.now(),
@@ -70,18 +82,19 @@ export class LeadLagService {
   }
 
   computeNow({ topK = 15 } = {}) {
-    const symbols = Array.isArray(this.feed.symbols) ? this.feed.symbols : [];
+    const series = Array.isArray(this.feed.listSeries?.()) ? this.feed.listSeries() : [];
     const returnsBySymbol = {};
 
-    for (const s of symbols) {
-      const bars = this.feed.getBars(s, this.windowBars);
-      // r exists on bars; keep numeric only
+    for (const x of series) {
+      const key = String(x?.key || "");
+      if (!key) continue;
+      const bars = this.feed.getBars(x.symbol, this.windowBars, x.source);
       const rs = [];
       for (const b of bars) {
         const v = Number(b?.r);
         if (Number.isFinite(v)) rs.push(v);
       }
-      returnsBySymbol[s] = rs;
+      returnsBySymbol[key] = rs;
     }
 
     const res = computeLeadLagPairs({

@@ -29,6 +29,9 @@ export class RangeMetricsRunner {
     this.regime = { regime: "UNCLEAR" };
     this.counters = { signals: 0, entries: 0, tp1: 0, tp2: 0, sl: 0, notrade: 0 };
     this.killSwitchActive = false;
+    this.lastFeatureUpdateTs = null;
+    this.lastUniverseScanTs = null;
+    this.lastDiag = {};
   }
 
   emit(kind, payload = {}) {
@@ -50,6 +53,9 @@ export class RangeMetricsRunner {
       maxPositions: this.cfg.maxPositions,
       lastScanTs: this.lastScanTs,
       lastDecisionTs: this.lastDecisionTs,
+      lastFeatureUpdateTs: this.lastFeatureUpdateTs,
+      lastUniverseScanTs: this.lastUniverseScanTs,
+      diagnostics: this.lastDiag,
       counters: this.counters,
       latestPlan: this.lastPlan,
     };
@@ -108,11 +114,19 @@ export class RangeMetricsRunner {
   async scanLoopTick() {
     const symbols = this.cfg.symbols;
     for (const s of symbols) {
-      this.features[s] = computeFeatures(s, this.mdl, this.cfg);
+      const f = computeFeatures(s, this.mdl, this.cfg);
+      if (!Number(f.turnover24h) || Number(f.turnover24h) <= 0) {
+        const fb = await this.mdl.refreshTicker(s);
+        if (fb?.turnover24h) f.turnover24h = fb.turnover24h;
+      }
+      this.features[s] = f;
       this.ranges[s] = calcRangeBands(s, this.mdl, this.cfg);
+      this.lastDiag[s] = this.mdl.getDiagnostics(s);
     }
     this.regime = detectRegimeBTC(this.mdl, this.cfg);
     this.candidates = selectUniverse(symbols, this.features, this.ranges, this.cfg).slice(0, this.cfg.shortlistForSignals);
+    this.lastFeatureUpdateTs = Date.now();
+    this.lastUniverseScanTs = Date.now();
     this.lastScanTs = Date.now();
     this.emit("candidates", this.candidates);
     this.emit("status", this.status());
@@ -128,8 +142,11 @@ export class RangeMetricsRunner {
       if (!c.pass) reasons.push(...c.blockers.filter((b) => !b.pass));
       if (!(c.nearSupport || c.nearResistance)) reasons.push({ code: "range", label: "Not near range bands", value: "middle", threshold: "near S/R", pass: false });
       const f = this.features[c.symbol] || {};
-      if (Number(f.volZ || 0) < 0.2) reasons.push({ code: "volz", label: "VolZ low", value: f.volZ, threshold: 0.2, pass: false });
+      if (Math.abs(Number(f.volZ || 0)) < 0.2) reasons.push({ code: "volz", label: "|VolZ| ниже минимума", value: f.volZ, threshold: 0.2, pass: false });
       const hasLiq = Number(f.liqSpike || 0) > 0.1;
+      const diag = this.lastDiag[c.symbol] || {};
+      const staleMs = diag.lastTickerTs ? (now - diag.lastTickerTs) : Infinity;
+      if (staleMs > Number(this.cfg.staleTickerSec || 30) * 1000) reasons.push({ code: "staleFeed", label: "Нет свежих данных (stale feed)", value: staleMs, threshold: Number(this.cfg.staleTickerSec || 30) * 1000, pass: false });
       if (!hasLiq) reasons.push({ code: "liq", label: "No liquidation cluster", value: f.liqSpike, threshold: 0.1, pass: false });
 
       if (reasons.length) {
@@ -146,10 +163,12 @@ export class RangeMetricsRunner {
         });
         this.emit("noTrade", rec);
         if (this.cfg.logNoEntryEvery10s && (now % (this.cfg.noEntryLogIntervalSec * 1000) < 1800)) {
-          this.emit("log", { level: "info", symbol: c.symbol, msg: "No entry blockers", data: reasons.slice(0, 3) });
+          this.emit("log", { level: "info", symbol: c.symbol, msg: "Блокеры входа", data: reasons.slice(0, 3) });
         }
         continue;
       }
+
+      if (this.cfg.logNoEntryEvery10s && (now % (this.cfg.noEntryLogIntervalSec * 1000) < 1800)) this.emit("log", { level: "info", symbol: c.symbol, msg: "No entry blockers: PASS" });
 
       const side = c.nearSupport ? "Buy" : "Sell";
       const price = this.mdl.getMid(c.symbol);

@@ -21,6 +21,11 @@ export function PaperTestPage() {
   const [useBinance, setUseBinance] = useState(true);
   const [showToast, setShowToast] = useState(false);
   const [tick, setTick] = useState(0);
+  const [autoTune, setAutoTune] = useState(true);
+  const [startTuningAfterMin, setStartTuningAfterMin] = useState(12);
+  const [tuningIntervalSec, setTuningIntervalSec] = useState(90);
+  const [targetMinTradesPerHour, setTargetMinTradesPerHour] = useState(1);
+  const [bounds, setBounds] = useState({ minCorr: { floor: 0.05, ceil: 0.4 }, impulseZ: { floor: 1.2, ceil: 4 }, confirmZ: { floor: 0.05, ceil: 1 }, edgeMult: { floor: 1.5, ceil: 8 } });
 
   const presets = app.presets || [];
   useEffect(() => {
@@ -51,7 +56,7 @@ export function PaperTestPage() {
   const start = async () => {
     const single = presets.find((p) => p.name === isolatedPresetName);
     const presetsPayload = multiStrategy ? selectedPresets : (single ? [single] : []);
-    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
+    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, presets: presetsPayload, multiStrategy, exploitBest, testOnlyPresetName: isolatedPresetName || null, isolatedPresetName, useBybit, useBinance, autoTune, autoTuneConfig: { startTuningAfterMin, tuningIntervalSec, targetMinTradesPerHour, bounds } });
     if (res?.queued) setShowToast(true);
   };
 
@@ -72,6 +77,18 @@ export function PaperTestPage() {
         <div className="mb-2 d-flex gap-3 flex-wrap"><Form.Check type="checkbox" label="Use Bybit (BT)" checked={useBybit} onChange={(e) => setUseBybit(e.target.checked)} /><Form.Check type="checkbox" label="Use Binance (BNB)" checked={useBinance} onChange={(e) => setUseBinance(e.target.checked)} /></div>
         <div className="d-flex gap-2 flex-wrap mb-2">{presets.map((p) => <Form.Check key={p.name} type="checkbox" label={p.name} checked={selectedPresetIds.includes(p.name)} onChange={(e) => setSelectedPresetIds((old) => e.target.checked ? [...new Set([...old, p.name])] : old.filter((id) => id !== p.name))} />)}</div>
         <Form.Group className="mb-2"><Form.Label>Тестировать только</Form.Label><Form.Select value={isolatedPresetName} onChange={(e) => setIsolatedPresetName(e.target.value)} style={{ maxWidth: 340 }}>{presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</Form.Select></Form.Group>
+        <div className="mb-2"><Form.Check type="checkbox" label="Авто-тюн порогов (если 0 сделок)" checked={autoTune} onChange={(e) => setAutoTune(e.target.checked)} /></div>
+        <Row className="g-2 mb-2">
+          <Col md={3}><Form.Label>startTuningAfterMin</Form.Label><Form.Control type="number" value={startTuningAfterMin} onChange={(e) => setStartTuningAfterMin(Number(e.target.value))} /></Col>
+          <Col md={3}><Form.Label>tuningIntervalSec</Form.Label><Form.Control type="number" value={tuningIntervalSec} onChange={(e) => setTuningIntervalSec(Number(e.target.value))} /></Col>
+          <Col md={3}><Form.Label>targetMinTradesPerHour</Form.Label><Form.Control type="number" value={targetMinTradesPerHour} onChange={(e) => setTargetMinTradesPerHour(Number(e.target.value))} /></Col>
+        </Row>
+        <Row className="g-2 mb-2">
+          <Col md={3}><Form.Label>minCorr floor/ceil</Form.Label><div className="d-flex gap-1"><Form.Control type="number" step="0.01" value={bounds.minCorr.floor} onChange={(e) => setBounds((b) => ({ ...b, minCorr: { ...b.minCorr, floor: Number(e.target.value) } }))} /><Form.Control type="number" step="0.01" value={bounds.minCorr.ceil} onChange={(e) => setBounds((b) => ({ ...b, minCorr: { ...b.minCorr, ceil: Number(e.target.value) } }))} /></div></Col>
+          <Col md={3}><Form.Label>impulseZ floor/ceil</Form.Label><div className="d-flex gap-1"><Form.Control type="number" step="0.1" value={bounds.impulseZ.floor} onChange={(e) => setBounds((b) => ({ ...b, impulseZ: { ...b.impulseZ, floor: Number(e.target.value) } }))} /><Form.Control type="number" step="0.1" value={bounds.impulseZ.ceil} onChange={(e) => setBounds((b) => ({ ...b, impulseZ: { ...b.impulseZ, ceil: Number(e.target.value) } }))} /></div></Col>
+          <Col md={3}><Form.Label>confirmZ floor/ceil</Form.Label><div className="d-flex gap-1"><Form.Control type="number" step="0.01" value={bounds.confirmZ.floor} onChange={(e) => setBounds((b) => ({ ...b, confirmZ: { ...b.confirmZ, floor: Number(e.target.value) } }))} /><Form.Control type="number" step="0.01" value={bounds.confirmZ.ceil} onChange={(e) => setBounds((b) => ({ ...b, confirmZ: { ...b.confirmZ, ceil: Number(e.target.value) } }))} /></div></Col>
+          <Col md={3}><Form.Label>edgeMult floor/ceil</Form.Label><div className="d-flex gap-1"><Form.Control type="number" step="0.1" value={bounds.edgeMult.floor} onChange={(e) => setBounds((b) => ({ ...b, edgeMult: { ...b.edgeMult, floor: Number(e.target.value) } }))} /><Form.Control type="number" step="0.1" value={bounds.edgeMult.ceil} onChange={(e) => setBounds((b) => ({ ...b, edgeMult: { ...b.edgeMult, ceil: Number(e.target.value) } }))} /></div></Col>
+        </Row>
         <div className="d-flex gap-2 flex-wrap"><Button onClick={() => start().catch(() => {})}>Запустить тест</Button><Button variant="outline-danger" onClick={() => app.stopPaperTest().catch(() => {})}>Остановить</Button><Button variant="outline-secondary" onClick={() => app.sendCommand("resetLearning", {}).catch(() => {})}>Сбросить историю</Button></div>
       </Card></Col>
 

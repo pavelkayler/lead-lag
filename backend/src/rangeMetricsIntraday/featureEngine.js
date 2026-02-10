@@ -11,7 +11,7 @@ export function calcATRpctFromBars(bars, len = 14) {
     if (p > 0 && c > 0) trs.push(Math.abs(c - p) / p);
   }
   const tail = trs.slice(-len);
-  return tail.length ? mean(tail) * 100 : null;
+  return tail.length ? mean(tail) : null;
 }
 
 export function calcVolZ(bars, windowBars = 48) {
@@ -94,6 +94,6 @@ export function computeFeatures(symbol, mdl, cfg) {
     cvd5m: cvd,
     cvdSlope: cvd - cvdPrev,
     spreadBps: Number(ticker?.spreadBps || 0),
-    turnover24h: Number(ticker?.turnover24h || 0),
+    turnover24h: Number(ticker?.turnover24h || ticker?.volume24h || 0),
   };
 }

@@ -31,7 +31,11 @@ export class LeadLagPaperStrategy {
     this.allowedSources = new Set(["BT", "BNB"]);
     this.blacklistSymbols = new Set();
     this.blacklistBySource = new Map();
-    this.attemptsBySymbol = new Map();
+    this.noMatchAsLeaderCount = new Map();
+    this.noMatchAsFollowerCount = new Map();
+    this.autoExcludedSeries = new Set();
+    this.autoExcludeNoMatchThreshold = 100;
+    this.baseLeaders = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
     this.onAutoExclude = null;
 
     this._timer = null;
@@ -43,6 +47,7 @@ export class LeadLagPaperStrategy {
     this._lastLogAt = new Map();
     this.currentPresetName = null;
     this.rejectCounters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
+    this.rejectDistance = { corrFail: [], impulseFail: [], edgeGateFail: [], confirmFail: [] };
     this.runtimeStatus = "Сканирую пары…";
   }
 
@@ -70,6 +75,7 @@ export class LeadLagPaperStrategy {
     if (Array.isArray(p.fixedLeaders)) { this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase()); this.useFixedLeaders = true; }
     if (p.useFixedLeaders != null) this.useFixedLeaders = !!p.useFixedLeaders;
     if (Array.isArray(p.allowedSources)) this.allowedSources = new Set(p.allowedSources.map((x) => String(x).toUpperCase()));
+    if (p.autoExcludeNoMatchThreshold != null) this.autoExcludeNoMatchThreshold = Math.max(10, Math.round(n(p.autoExcludeNoMatchThreshold, this.autoExcludeNoMatchThreshold)));
     if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
     if (Array.isArray(p.blacklist)) {
       this.blacklistSymbols = new Set();
@@ -77,8 +83,9 @@ export class LeadLagPaperStrategy {
       for (const b of p.blacklist) {
         const sym = String(b?.symbol || "").toUpperCase();
         if (!sym) continue;
-        this.blacklistSymbols.add(sym);
-        this.blacklistBySource.set(sym, Array.isArray(b?.sources) ? b.sources.map((x) => String(x).toUpperCase()) : []);
+        const src = Array.isArray(b?.sources) ? b.sources.map((x) => String(x).toUpperCase()) : [];
+        if (!src.length) this.blacklistSymbols.add(sym);
+        this.blacklistBySource.set(sym, src);
       }
     }
 
@@ -109,8 +116,9 @@ export class LeadLagPaperStrategy {
       fixedLeaders: this.fixedLeaders,
       useFixedLeaders: this.useFixedLeaders,
       allowedSources: Array.from(this.allowedSources),
-      blacklistSymbols: Array.from(this.blacklistSymbols),
-      blacklist: Array.from(this.blacklistSymbols).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
+      blacklistSymbols: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])),
+      blacklist: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
+      autoExcludeNoMatchThreshold: this.autoExcludeNoMatchThreshold,
     };
   }
 
@@ -120,17 +128,52 @@ export class LeadLagPaperStrategy {
     return raw.includes("|") ? raw.split("|")[0] : raw;
   }
 
-  _countAttemptFor(symbol, reason = "") {
-    const s = String(symbol || "").toUpperCase();
-    if (!s) return;
-    const next = (this.attemptsBySymbol.get(s) || 0) + 1;
-    this.attemptsBySymbol.set(s, next);
-    if (next < 500 || this.blacklistSymbols.has(s)) return;
+  _isSeriesBlacklisted(symbol, source = "BT") {
+    const sym = String(symbol || "").toUpperCase();
+    const src = String(source || "BT").toUpperCase();
+    if (!sym) return false;
+    if (this.blacklistSymbols.has(sym)) return true;
+    const list = this.blacklistBySource.get(sym) || [];
+    return list.includes(src);
+  }
 
-    const sources = this.feed?.getSymbolSources?.(s) || [];
-    this.blacklistSymbols.add(s);
-    this.blacklistBySource.set(s, sources);
-    this.onAutoExclude?.({ symbol: s, sources, attempts: next, reason: reason || "500_attempts_no_trade", presetName: this.currentPresetName || null });
+  _updateNoMatchCounters(pairs = []) {
+    const series = (Array.isArray(this.feed.listSeries?.()) ? this.feed.listSeries() : [])
+      .filter((x) => this.allowedSources.has(String(x?.source || "").toUpperCase()));
+    if (!series.length) return;
+    const leadersHit = new Set();
+    const followersHit = new Set();
+    for (const p of pairs) {
+      const leaderBase = this._symbolBase(p.leaderBase || p.leader);
+      const followerBase = this._symbolBase(p.followerBase || p.follower);
+      const leaderSource = String(p.leaderSource || "BT").toUpperCase();
+      const followerSource = String(p.followerSource || "BT").toUpperCase();
+      leadersHit.add(`${String(leaderBase || "").toUpperCase()}|${leaderSource}`);
+      followersHit.add(`${String(followerBase || "").toUpperCase()}|${followerSource}`);
+    }
+    for (const s of series) {
+      const symbol = String(s?.symbol || "").toUpperCase();
+      const source = String(s?.source || "BT").toUpperCase();
+      const key = `${symbol}|${source}`;
+      const noMatchLeader = leadersHit.has(key) ? 0 : (this.noMatchAsLeaderCount.get(key) || 0) + 1;
+      const noMatchFollower = followersHit.has(key) ? 0 : (this.noMatchAsFollowerCount.get(key) || 0) + 1;
+      this.noMatchAsLeaderCount.set(key, noMatchLeader);
+      this.noMatchAsFollowerCount.set(key, noMatchFollower);
+      if (this.baseLeaders.has(symbol)) continue;
+      if (this.autoExcludedSeries.has(key)) continue;
+      if (noMatchLeader >= this.autoExcludeNoMatchThreshold && noMatchFollower >= this.autoExcludeNoMatchThreshold) {
+        this.autoExcludedSeries.add(key);
+        this.onAutoExclude?.({
+          symbol,
+          source,
+          reason: "no_match_100",
+          noMatchAsLeaderCount: noMatchLeader,
+          noMatchAsFollowerCount: noMatchFollower,
+          threshold: this.autoExcludeNoMatchThreshold,
+          presetName: this.currentPresetName || null,
+        });
+      }
+    }
   }
 
   _strictFactor() {
@@ -184,15 +227,18 @@ export class LeadLagPaperStrategy {
   }
 
 
-  _countReject(key, status = null) {
+  _countReject(key, status = null, distanceToPass = null) {
     if (this.rejectCounters[key] != null) this.rejectCounters[key] += 1;
+    if (Number.isFinite(distanceToPass) && this.rejectDistance[key]) this.rejectDistance[key].push(Number(distanceToPass));
     if (status) this.runtimeStatus = status;
   }
 
   consumeRejectStats() {
     const counters = { ...this.rejectCounters };
+    const dist = Object.fromEntries(Object.entries(this.rejectDistance).map(([k, arr]) => [k, arr.slice()]));
     this.rejectCounters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
-    return { counters, runtimeStatus: this.runtimeStatus };
+    this.rejectDistance = { corrFail: [], impulseFail: [], edgeGateFail: [], confirmFail: [] };
+    return { counters, distance: dist, runtimeStatus: this.runtimeStatus };
   }
 
   _tick() {
@@ -231,6 +277,7 @@ export class LeadLagPaperStrategy {
     if (this.broker.position) return;
 
     const pairs = (this.leadLag.latest?.pairs || []).slice(0, 20);
+    this._updateNoMatchCounters(pairs);
     const top = pairs.find((p) => {
       const leaderBase = this._symbolBase(p.leaderBase || p.leader);
       const followerBase = this._symbolBase(p.followerBase || p.follower);
@@ -238,7 +285,7 @@ export class LeadLagPaperStrategy {
       const followerSource = String(p.followerSource || "BT").toUpperCase();
       if (!this.allowedSources.has(leaderSource) || !this.allowedSources.has(followerSource)) return false;
       if (this.useFixedLeaders && !this.fixedLeaders.includes(String(leaderBase || "").toUpperCase())) return false;
-      return !this.blacklistSymbols.has(String(followerBase || "").toUpperCase());
+      return !this._isSeriesBlacklisted(followerBase, followerSource);
     });
     const topLeader = this._symbolBase(top?.leaderBase || top?.leader);
     const topFollower = this._symbolBase(top?.followerBase || top?.follower);
@@ -276,8 +323,7 @@ export class LeadLagPaperStrategy {
     const strictFactor = this._strictFactor();
     const effMinCorr = this.minCorr * strictFactor;
     if (top.corr == null || top.corr < effMinCorr) {
-      this._countReject("corrFail", "Жду корреляцию…");
-      this._countAttemptFor(follower, "corr");
+      this._countReject("corrFail", "Жду корреляцию…", effMinCorr - Number(top.corr || 0));
       this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: effMinCorr, baseMinCorr: this.minCorr, entryStrictness: this.entryStrictness }, "skip:corr");
       return;
     }
@@ -301,8 +347,7 @@ export class LeadLagPaperStrategy {
 
     const thr = this.impulseZ * strictFactor * leaderVol;
     if (!this._pendingSetup && Math.abs(lastR) < thr) {
-      this._countReject("impulseFail", "Жду импульс…");
-      this._countAttemptFor(follower, "impulse");
+      this._countReject("impulseFail", "Жду импульс…", thr - Math.abs(lastR));
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
       return;
     }
@@ -320,8 +365,7 @@ export class LeadLagPaperStrategy {
       const costsR = (2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0))) / 10_000;
       const edgeGateR = costsR * this.edgeMult * strictFactor;
       if (tpR2 < edgeGateR) {
-        this._countReject("edgeGateFail", "Edge gate блокирует вход…");
-        this._countAttemptFor(follower, "edge");
+        this._countReject("edgeGateFail", "Edge gate блокирует вход…", edgeGateR - tpR2);
         this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, tpR2, edgeGateR, costsR, edgeMult: this.edgeMult }, `gate:edge:${leader}:${follower}`);
         return;
       }
@@ -375,7 +419,8 @@ export class LeadLagPaperStrategy {
     }
 
     if (!followerConfirmed || !trendConfirmed) {
-      this._countReject("confirmFail", "Setup создан, жду подтверждение…");
+      const gap = Math.abs(followerConfirmAbsMin) - Math.abs(Number(followerLastR || 0));
+      this._countReject("confirmFail", "Setup создан, жду подтверждение…", gap);
       this._logThrottled("paper_trigger_skip", {
         reason: "trigger_confirm_not_met",
         side: setup.side,

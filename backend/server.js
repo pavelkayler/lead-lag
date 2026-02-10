@@ -972,12 +972,14 @@ async startPaperTest(payload) {
   const presets = Array.isArray(payload?.presets) ? payload.presets : null;
   const multiStrategy = !!payload?.multiStrategy;
   const exploitBest = !!payload?.exploitBest;
-  const isolatedPresetName = payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null;
+  const isolatedPresetName = payload?.testOnlyPresetName ? String(payload.testOnlyPresetName) : (payload?.isolatedPresetName ? String(payload.isolatedPresetName) : null);
+  const autoTune = payload?.autoTune !== false;
+  const autoTuneConfig = payload?.autoTuneConfig || {};
   const useBybit = payload?.useBybit !== false;
   const useBinance = payload?.useBinance !== false;
 
   Promise.resolve().then(async () => {
-    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
+    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, autoTune, autoTuneConfig, multiStrategy, exploitBest, isolatedPresetName, useBybit, useBinance });
     hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   }).catch((e) => {
     logger?.log("paper_test_start_error", { error: String(e?.message || e) });

@@ -960,6 +960,10 @@ async stopPaperTest(payload) {
   return await paperTest.stop(reason);
 },
 
+async resetLearning() {
+  return paperTest.resetLearning();
+},
+
 async getPaperTestStatus() {
   return paperTest.getStatus();
 },

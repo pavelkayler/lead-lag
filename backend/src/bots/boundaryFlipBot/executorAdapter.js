@@ -4,7 +4,10 @@ export class BoundaryExecutorAdapter {
     this.logger = logger;
   }
 
-  async getInstrumentRules(symbol) {
+  async getInstrumentRules(symbol, mode = "real") {
+    if (String(mode).toLowerCase() === "paper" && String(symbol || "").toUpperCase() === "TESTUSDT") {
+      return { tickSize: 0.01, qtyStep: 0.001, minNotional: 1 };
+    }
     const resp = await this.rest.publicGet("/v5/market/instruments-info", { category: "linear", symbol });
     const item = resp?.result?.list?.[0] || {};
     return {

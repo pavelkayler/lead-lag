@@ -117,7 +117,7 @@ import http from "http";
 import crypto from "crypto";
 import { WebSocketServer } from "ws";
 
-import { JsonlLogger } from "./src/utils/logger.js";
+import { DailyJsonlLogger, JsonlLogger } from "./src/utils/logger.js";
 import { WsHub } from "./src/utils/wsHub.js";
 import { FeedManager } from "./src/feed/feedManager.js";
 import { LeadLagService } from "./src/leadlag/leadLagService.js";
@@ -1061,8 +1061,13 @@ async getRangeMetricsCandidates() {
 },
 
 async startBoundaryFlipBot(payload = {}) {
+  const cfg = payload || {};
+  if (String(cfg?.mode || "paper").toLowerCase() === "paper") {
+    const symbol = String(cfg?.symbol || "").toUpperCase();
+    if (symbol) feed.setSymbols(Array.from(new Set([...(feed.symbols || []), symbol])));
+  }
   Promise.resolve().then(async () => {
-    await boundaryFlipBot.start(payload || {});
+    await boundaryFlipBot.start(cfg);
   }).catch((e) => logger?.log("boundary_flip_start_err", { error: e?.message || String(e) }));
   return { ok: true, queued: true };
 },
@@ -1108,6 +1113,7 @@ function setupWebSocketServer(server) {
   const logger = new JsonlLogger();
   const leadlagFileLogger = new JsonlLogger({ dir: "logs/leadlag" });
   const leadlagLogger = makeLeadLagLogger(logger, leadlagFileLogger);
+const flipFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "logs", "flip"), prefix: "flip" });
   const rest = new BybitRestClient({ baseUrl: BYBIT_CFG.httpBaseUrl, logger });
 const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
 
@@ -1157,8 +1163,8 @@ const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hu
   const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, instruments, logger });
   const rangeRunner = new RangeMetricsRunner({ feed, rest, hub, logger, risk });
   const boundaryExecutor = new BoundaryExecutorAdapter({ rest, logger });
-  const boundaryTracker = new CycleTracker({ rest, executor: boundaryExecutor, logger });
-  const boundaryFlipBot = new BoundaryFlipBotRunner({ hub, logger, executor: boundaryExecutor, tracker: boundaryTracker });
+  const boundaryTracker = new CycleTracker({ rest, feed, executor: boundaryExecutor, logger });
+  const boundaryFlipBot = new BoundaryFlipBotRunner({ hub, logger, fileLogger: flipFileLogger, feed, executor: boundaryExecutor, tracker: boundaryTracker });
 
   (async () => {
     try {

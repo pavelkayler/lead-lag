@@ -22,6 +22,7 @@ const DEFAULT_PRESET = {
   blacklistSymbols: [],
   blacklist: [],
   useFixedLeaders: false,
+  interExchangeArbEnabled: true,
   autoExcludeNoMatchThreshold: 100,
   riskMode: "OFF",
   riskImpulseMargin: 0.4,
@@ -559,6 +560,9 @@ export class PaperTestRunner {
     const allowedSources = [useBybit ? "BT" : null, useBinance ? "BNB" : null].filter(Boolean);
     if (!allowedSources.length) throw new Error("At least one source must be enabled: BT or BNB");
     this.logger?.log("paper_test_sources", { useBybit: !!useBybit, useBinance: !!useBinance, message: `Sources: BT=${useBybit ? "ON" : "OFF"}, BNB=${useBinance ? "ON" : "OFF"}` });
+    if (usePresets.some((p) => p?.interExchangeArbEnabled) && (!useBybit || !useBinance)) {
+      this.logger?.log("paper_test_inter_exchange_missing_sources", { useBybit: !!useBybit, useBinance: !!useBinance, message: "interExchangeArbEnabled: нужны обе биржи (BT+BNB), пары не будут сформированы" });
+    }
     if (!this.feed.running) this.feed.start();
 
     this.broker.reset();

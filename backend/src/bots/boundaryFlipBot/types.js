@@ -61,6 +61,7 @@ export function makeInitialStatus(config) {
     cycleId: 0,
     lastCycleReason: null,
     lastError: null,
+    startedAt: null,
     updatedAt: Date.now(),
   };
 }

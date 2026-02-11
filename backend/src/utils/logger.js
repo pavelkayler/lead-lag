@@ -48,3 +48,42 @@ export class JsonlLogger {
     this._stream = null;
   }
 }
+
+export class DailyJsonlLogger {
+  constructor({ dir = process.env.LOG_DIR || "logs", prefix = "events" } = {}) {
+    this.dir = dir;
+    this.prefix = prefix;
+    this._stream = null;
+    this._filePath = null;
+    this._currentDay = "";
+    fs.mkdirSync(this.dir, { recursive: true });
+  }
+
+  _dayStamp(ts = Date.now()) {
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  _ensureStream(ts = Date.now()) {
+    const day = this._dayStamp(ts);
+    if (this._stream && this._currentDay === day) return;
+    try { this._stream?.end(); } catch {}
+    this._currentDay = day;
+    this._filePath = path.join(this.dir, `${this.prefix}-${day}.jsonl`);
+    this._stream = fs.createWriteStream(this._filePath, { flags: "a" });
+  }
+
+  log(type, payload = {}) {
+    const ts = Date.now();
+    this._ensureStream(ts);
+    try {
+      this._stream?.write(`${JSON.stringify({ ts, type, ...payload })}\n`);
+    } catch {}
+  }
+
+  close() {
+    try { this._stream?.end(); } catch {}
+    this._stream = null;
+  }
+}

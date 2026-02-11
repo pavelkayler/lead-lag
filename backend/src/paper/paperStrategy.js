@@ -54,6 +54,10 @@ export class LeadLagPaperStrategy {
     this.riskModeEnabled = false;
     this.riskLevel = 0;
     this._gatePassStamps = { impulse: [], corr: [], confirm: [], edge: [] };
+    this._enterIntentStamps = [];
+    this._execRejectStamps = [];
+    this._execRejectByReason = {};
+    this.lastDecisionRecord = null;
 
     this._timer = null;
     this._lastLeaderBarT = null;
@@ -106,8 +110,8 @@ export class LeadLagPaperStrategy {
     }
     if (p.riskModeEnabled != null) this.riskModeEnabled = !!p.riskModeEnabled;
     if (p.riskLevel != null) this.riskLevel = Math.max(0, Math.min(3, Math.round(n(p.riskLevel, this.riskLevel))));
-    if (p.riskImpulseMargin != null) this.riskImpulseMargin = Math.max(0, n(p.riskImpulseMargin, this.riskImpulseMargin));
-    if (p.riskQtyMultiplier != null) this.riskQtyMultiplier = Math.min(1, Math.max(0.05, n(p.riskQtyMultiplier, this.riskQtyMultiplier)));
+    if (p.riskImpulseMargin != null) this.riskImpulseMargin = Math.min(0.8, Math.max(0.1, n(p.riskImpulseMargin, this.riskImpulseMargin)));
+    if (p.riskQtyMultiplier != null) this.riskQtyMultiplier = Math.min(1, Math.max(0.2, n(p.riskQtyMultiplier, this.riskQtyMultiplier)));
     if (p.riskCooldownMin != null) this.riskCooldownMin = Math.max(1, Math.round(n(p.riskCooldownMin, this.riskCooldownMin)));
     if (p.maxRiskEntriesPerHour != null) this.maxRiskEntriesPerHour = Math.max(1, Math.round(n(p.maxRiskEntriesPerHour, this.maxRiskEntriesPerHour)));
     if (p.protectCoreLeaders != null) this.protectCoreLeaders = !!p.protectCoreLeaders;
@@ -169,6 +173,7 @@ export class LeadLagPaperStrategy {
       protectCoreLeaders: this.protectCoreLeaders,
       coreLeaders: this.coreLeaders,
       gatePassCountHour: this._gatePassCounts(),
+      decisionRecord: this.lastDecisionRecord,
     };
   }
 
@@ -181,11 +186,20 @@ export class LeadLagPaperStrategy {
     for (const k of Object.keys(this._gatePassStamps)) {
       this._gatePassStamps[k] = (this._gatePassStamps[k] || []).filter((ts) => Number(ts) >= cutoff);
     }
+    this._enterIntentStamps = this._enterIntentStamps.filter((ts) => Number(ts) >= cutoff);
+    this._execRejectStamps = this._execRejectStamps.filter((x) => Number(x?.ts) >= cutoff);
+    const execRejectCount = this._execRejectStamps.length;
+    const byReason = {};
+    for (const x of this._execRejectStamps) byReason[x.reason || "unknown"] = Number(byReason[x.reason || "unknown"] || 0) + 1;
+    this._execRejectByReason = byReason;
     return {
       impulsePassCount: this._gatePassStamps.impulse.length,
       corrPassCount: this._gatePassStamps.corr.length,
       confirmPassCount: this._gatePassStamps.confirm.length,
       edgePassCount: this._gatePassStamps.edge.length,
+      enterIntentCount: this._enterIntentStamps.length,
+      execRejectCount,
+      execRejectByReason: byReason,
     };
   }
 
@@ -193,6 +207,27 @@ export class LeadLagPaperStrategy {
     if (!this._gatePassStamps[name]) return;
     this._gatePassStamps[name].push(Date.now());
     this._gatePassCounts();
+  }
+
+  _markEnterIntent() {
+    this._enterIntentStamps.push(Date.now());
+    this._gatePassCounts();
+  }
+
+  _markExecReject(reason = "unknown", payload = {}) {
+    this._execRejectStamps.push({ ts: Date.now(), reason: String(reason || "unknown") });
+    this._gatePassCounts();
+    this.logger?.log("paper_exec_reject", { event: "[EXEC-REJECT]", reason, ...payload, presetName: this.currentPresetName || null });
+  }
+
+  _gateMetric(value, thr, pass, details = null) {
+    const v = Number(value || 0);
+    const t = Number(thr || 0);
+    return { value: v, thr: Number.isFinite(thr) ? t : null, pass: !!pass, margin: Number((v - t).toFixed(6)), details: details || undefined };
+  }
+
+  _setDecisionRecord(rec = {}) {
+    this.lastDecisionRecord = { ts: Date.now(), ...rec };
   }
 
   _canOpenRiskEntry() {
@@ -455,6 +490,7 @@ export class LeadLagPaperStrategy {
     }
 
     if (!pairs.length || !top) {
+      this._setDecisionRecord({ tradeGate: "WAIT_NO_CANDIDATE", reason: "noCandidatePairs" });
       this._countReject("noCandidatePairs", "Сканирую пары…");
       return;
     }
@@ -466,6 +502,7 @@ export class LeadLagPaperStrategy {
     const strictFactor = this._strictFactor();
     const effMinCorr = this.minCorr * strictFactor;
     if (top.corr == null || top.corr < effMinCorr) {
+      this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_CORR", reason: "corrFail", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, false) });
       this._countReject("corrFail", "Жду корреляцию…", effMinCorr - Number(top.corr || 0));
       this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: effMinCorr, baseMinCorr: this.minCorr, entryStrictness: this.entryStrictness }, "skip:corr");
       return;
@@ -499,6 +536,7 @@ export class LeadLagPaperStrategy {
     const riskWindowPass = this._isRiskModeEnabled() && impulseZNow >= riskImpulseMin;
 
     if (!this._pendingSetup && !debugImpulseBypass && Math.abs(lastR) < thr && !riskWindowPass) {
+      this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_IMPULSE", reason: "impulseFail", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, false) });
       this._countReject("impulseFail", "Жду импульс…", thr - Math.abs(lastR), {
         impulseZNow,
         impulseZThr,
@@ -532,6 +570,7 @@ export class LeadLagPaperStrategy {
       const effectiveEdgeMult = Math.max(1, this.edgeMult - (0.5 * Math.max(0, Math.min(3, Number(this.riskLevel || 0)))));
       const edgeGateR = costsR * effectiveEdgeMult * strictFactor;
       if (tpR2 < edgeGateR) {
+        this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_EDGE", reason: "edgeGateFail", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, true), edge: this._gateMetric(tpR2, edgeGateR, false) });
         this._countReject("edgeGateFail", "Edge gate блокирует вход…", edgeGateR - tpR2, {
           edgeNow: tpR2,
           edgeThr: edgeGateR,
@@ -567,6 +606,7 @@ export class LeadLagPaperStrategy {
         lastFollowerBarT: null,
       };
       this.runtimeStatus = "Setup создан, жду подтверждение…";
+      this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_CONFIRM", reason: "confirm_pending", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, true), edge: this._gateMetric(tpR2, edgeGateR, true) });
       this.logger?.log("paper_setup", { event: "setup_created", leader, follower, side, corr: top.corr, tpR1, tpR2, slR, edgeGateR, ttlBars: this.setupTTLbars, source: followerSource, symbol: follower, presetName: this.currentPresetName || null });
       return;
     }
@@ -595,6 +635,7 @@ export class LeadLagPaperStrategy {
 
     if (!followerConfirmed || !trendConfirmed) {
       const gap = Math.abs(followerConfirmAbsMin) - Math.abs(Number(followerLastR || 0));
+      this._setDecisionRecord({ leader: setup.leader, follower: setup.follower, tradeGate: "WAIT_CONFIRM", reason: "confirmFail", confirm: this._gateMetric(Math.abs(Number(followerLastR || 0)), Math.abs(followerConfirmAbsMin), false, { samples: Number(top?.samples || 0), impulses: Number(top?.impulses || 0), trendConfirmed }) });
       this._countReject("confirmFail", "Setup создан, жду подтверждение…", gap);
       this._logThrottled("paper_trigger_skip", {
         reason: "trigger_confirm_not_met",
@@ -616,6 +657,8 @@ export class LeadLagPaperStrategy {
     const riskCandidate = !!setup.isRiskCandidate;
     const riskAllowed = riskCandidate ? this._canOpenRiskEntry() : { ok: false, reason: "not_risk" };
     if (riskCandidate && !riskAllowed.ok) {
+      this._markExecReject(riskAllowed.reason === "cooldown" ? "cooldown" : "maxRiskEntriesPerHour", { symbol: setup.follower, leader: setup.leader, follower: setup.follower });
+      this._setDecisionRecord({ leader: setup.leader, follower: setup.follower, tradeGate: "COOLDOWN", reason: riskAllowed.reason });
       this._countReject("impulseFail", "Жду импульс…", Math.max(0, Number(setup.impulseZThr || 0) - Number(setup.impulseZNow || 0)), {
         impulseZNow: setup.impulseZNow,
         impulseZThr: setup.impulseZThr,
@@ -634,6 +677,10 @@ export class LeadLagPaperStrategy {
     const qtyUSDT = Math.max(1, Number(this.qtyUSDT || 0) * qtyMultiplier);
 
     try {
+      const qtyRaw = Number(qtyUSDT) / Math.max(1e-9, Number(entryMid));
+      const qtyRounded = Math.max(0, qtyRaw);
+      this._markEnterIntent();
+      this.logger?.log("paper_exec_try", { event: "[EXEC-TRY]", symbol: setup.follower, mode: "paper", qtyRaw, qtyRounded, notional: qtyUSDT, minNotional: 1, presetName: this.currentPresetName || null });
       this.broker.open({
         symbol: setup.follower,
         side: setup.side,
@@ -683,6 +730,7 @@ export class LeadLagPaperStrategy {
       }
 
       this.runtimeStatus = "Сделка открыта";
+      this._setDecisionRecord({ leader: setup.leader, follower: setup.follower, tradeGate: "READY", reason: riskCandidate ? "risk_entry" : "entry", corr: this._gateMetric(setup.corr, effMinCorr, true), impulse: this._gateMetric(setup.impulseZNow, setup.impulseZThr, true), edge: this._gateMetric(setup.tpR2, setup.edgeGateR, true), confirm: this._gateMetric(Math.abs(Number(followerLastR || 0)), Math.abs(followerConfirmAbsMin), true, { samples: Number(top?.samples || 0), impulses: Number(top?.impulses || 0) }) });
       if (this.debugAllowEntryWithoutImpulse) this._lastDebugEntryAt = Date.now();
       this.logger?.log("paper_signal", {
         event: "opened_trade",
@@ -702,7 +750,10 @@ export class LeadLagPaperStrategy {
       this._broadcastState({ lastSignal: { leader: setup.leader, follower: setup.follower, side: setup.side, corr: setup.corr, tpR1: setup.tpR1, tpR2: setup.tpR2, slR: setup.slR } });
       this._pendingSetup = null;
     } catch (e) {
-      this.logger?.log("paper_signal_err", { error: e?.message || String(e) });
+      const reason = String(e?.message || e || "unknown");
+      this._markExecReject("brokerOpenError", { symbol: setup?.follower, error: reason });
+      this._setDecisionRecord({ leader: setup?.leader, follower: setup?.follower, tradeGate: "BLOCKED_EXEC", reason });
+      this.logger?.log("paper_signal_err", { error: reason });
     }
   }
 }

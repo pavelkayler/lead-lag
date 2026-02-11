@@ -117,7 +117,7 @@ import http from "http";
 import crypto from "crypto";
 import { WebSocketServer } from "ws";
 
-import { DailyJsonlLogger, JsonlLogger, readLastJsonlLines } from "./src/utils/logger.js";
+import { DailyJsonlLogger, JsonlLogger, readLastJsonlLinesTail } from "./src/utils/logger.js";
 import { WsHub } from "./src/utils/wsHub.js";
 import { FeedManager } from "./src/feed/feedManager.js";
 import { LeadLagService } from "./src/leadlag/leadLagService.js";
@@ -246,7 +246,18 @@ function makeLeadLagLogger(primaryLogger, leadlagFileLogger) {
   return {
     log(type, payload = {}) {
       primaryLogger?.log?.(type, payload);
-      leadlagFileLogger?.log?.(type, enrichPayload(type, payload));
+      const enriched = enrichPayload(type, payload);
+      leadlagFileLogger?.logRecord?.({
+        ts: Date.now(),
+        bot: "leadlag",
+        level: String(enriched?.level || "info").toLowerCase(),
+        eventType: type,
+        sessionId: enriched?.runId || enriched?.sessionId || null,
+        presetId: enriched?.presetName || enriched?.currentPresetName || null,
+        symbol: enriched?.symbol || null,
+        exchange: enriched?.source || null,
+        payload: enriched,
+      });
     },
     rotate() {
       primaryLogger?.rotate?.();
@@ -1105,17 +1116,21 @@ async deletePreset(payload = {}) {
       return { ok: true, params: strat.getParams(), state: paper.getState() };
     },
     async paperState() { return { params: strat.getParams(), state: paper.getState() }; },
-    async getBotLogs(payload = {}) {
+    async getLogTail(payload = {}) {
       const bot = String(payload?.bot || "leadlag").toLowerCase();
       const lines = Math.max(1, Math.min(500, Number(payload?.lines || 200)));
       const day = new Date();
       const pad = (n) => String(n).padStart(2, "0");
       const stamp = `${day.getFullYear()}${pad(day.getMonth() + 1)}${pad(day.getDate())}`;
-      const baseDir = bot === "flipbot" ? path.join(process.cwd(), "logs", "flipbot") : path.join(process.cwd(), "logs", "leadlag");
-      const prefix = bot === "flipbot" ? "flipbot" : "leadlag";
+      const baseDir = bot === "flip" || bot === "flipbot"
+        ? path.join(process.cwd(), "backend", "logs", "flip")
+        : path.join(process.cwd(), "backend", "logs", "leadlag");
+      const prefix = bot === "flip" || bot === "flipbot" ? "flip" : "leadlag";
       const fp = path.join(baseDir, `${prefix}-${stamp}.jsonl`);
-      return { bot: prefix, file: fp, lines: readLastJsonlLines(fp, lines) };
+      return { bot: prefix, file: fp, lines: readLastJsonlLinesTail(fp, lines) };
     },
+
+    async getBotLogs(payload = {}) { return this.getLogTail(payload); },
 
   };
 }
@@ -1123,9 +1138,9 @@ async deletePreset(payload = {}) {
 function setupWebSocketServer(server) {
   const wss = new WebSocketServer({ server });
   const logger = new JsonlLogger();
-  const leadlagFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "logs", "leadlag"), prefix: "leadlag" });
+  const leadlagFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "backend", "logs", "leadlag"), prefix: "leadlag" });
   const leadlagLogger = makeLeadLagLogger(logger, leadlagFileLogger);
-  const flipFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "logs", "flipbot"), prefix: "flipbot" });
+  const flipFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "backend", "logs", "flip"), prefix: "flip" });
   const rest = new BybitRestClient({ baseUrl: BYBIT_CFG.httpBaseUrl, logger });
 const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
 

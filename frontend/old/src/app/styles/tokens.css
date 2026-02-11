@@ -1,0 +1,7 @@
+:root{
+  --bg:#ffffff;
+  --text:#111827;
+  --muted:rgba(17,24,39,0.75);
+  --border:rgba(0,0,0,0.08);
+  --thead:#111827;
+}

@@ -43,6 +43,7 @@ export function AppProviders({ children }) {
   const [boundaryFlip, setBoundaryFlip] = useState({ status: null, logs: [] });
   const [uiError, setUiError] = useState("");
   const [activePath, setActivePath] = useState(() => window.location.pathname || "/");
+  const [wsTopics, setWsTopics] = useState([]);
 
   const sendCommand = useCallback((type, payload = {}, timeoutMs = null) => {
     const ws = wsRef.current;
@@ -73,11 +74,11 @@ export function AppProviders({ children }) {
         setSymbolsState(st.feed?.symbols || []);
         try { const p = await sendCommand("listPresets", {}); setPresets(p.presets || []); setPresetStats(p.presetStats || {}); } catch {}
         for (const topic of topicsForPath(window.location.pathname || "/")) {
-          try { await sendCommand("subscribe", { topic }); wsTopicsRef.current.add(topic); } catch {}
+          try { await sendCommand("subscribe", { topic }); wsTopicsRef.current.add(topic); setWsTopics(Array.from(wsTopicsRef.current)); } catch {}
         }
       } catch (e) { console.error("[ACTION] getStatus error", e); }
     };
-    ws.onclose = () => { setStatus("disconnected"); setClientId(null); wsTopicsRef.current.clear(); };
+    ws.onclose = () => { setStatus("disconnected"); setClientId(null); wsTopicsRef.current.clear(); setWsTopics([]); };
     ws.onerror = (e) => console.error("WS error", e);
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
@@ -169,8 +170,18 @@ export function AppProviders({ children }) {
     }
   }, []);
 
-  const subscribe = (topic) => action("subscribe", () => sendCommand("subscribe", { topic }));
-  const unsubscribe = (topic) => action("unsubscribe", () => sendCommand("unsubscribe", { topic }));
+  const subscribe = (topic) => action("subscribe", async () => {
+    const res = await sendCommand("subscribe", { topic });
+    wsTopicsRef.current.add(topic);
+    setWsTopics(Array.from(wsTopicsRef.current));
+    return res;
+  });
+  const unsubscribe = (topic) => action("unsubscribe", async () => {
+    const res = await sendCommand("unsubscribe", { topic });
+    wsTopicsRef.current.delete(topic);
+    setWsTopics(Array.from(wsTopicsRef.current));
+    return res;
+  });
   const setSymbols = (list) => action("setSymbols", () => sendCommand("setSymbols", { symbols: list })).then((r) => { setSymbolsState(r.symbols || list); setFeedMaxSymbols(r.feedMaxSymbols || feedMaxSymbols); return r; });
   const startFeed = () => action("startFeed", () => sendCommand("startFeed", {}));
   const stopFeed = () => action("stopFeed", () => sendCommand("stopFeed", {}));
@@ -232,14 +243,12 @@ export function AppProviders({ children }) {
     const current = wsTopicsRef.current;
     for (const t of Array.from(current)) {
       if (!desired.has(t)) {
-        sendCommand("unsubscribe", { topic: t }).catch(() => {});
-        current.delete(t);
+        sendCommand("unsubscribe", { topic: t }).then(() => { current.delete(t); setWsTopics(Array.from(current)); }).catch(() => {});
       }
     }
     for (const t of Array.from(desired)) {
       if (!current.has(t)) {
-        sendCommand("subscribe", { topic: t }).catch(() => {});
-        current.add(t);
+        sendCommand("subscribe", { topic: t }).then(() => { current.add(t); setWsTopics(Array.from(current)); }).catch(() => {});
       }
     }
   }, [status, activePath, sendCommand]);
@@ -270,11 +279,11 @@ export function AppProviders({ children }) {
   }, [status, activePath]);
 
   const value = useMemo(() => ({
-    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, setUiError, activePath,
+    wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, setUiError, activePath, wsTopics,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
     startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
     startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates, startBoundaryFlipBot, stopBoundaryFlipBot, getBoundaryFlipBotStatus, getBotLogs, getLogTail,
-  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, activePath, connect, disconnect, sendCommand]);
+  }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, activePath, wsTopics, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

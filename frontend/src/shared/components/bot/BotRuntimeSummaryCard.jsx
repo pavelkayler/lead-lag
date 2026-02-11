@@ -14,7 +14,7 @@ function fmtDurationSec(sec) {
 }
 
 export function BotRuntimeSummaryCard({ status, mode = "paper", paperState, walletUSDT, nowTs = Date.now() }) {
-  const isRunning = String(status?.state || "").toUpperCase() === "RUNNING";
+  const isRunning = String(status?.state || "").toUpperCase().startsWith("RUNNING");
   const startedAt = Number(status?.startedAt || 0);
   const durationSec = isRunning && startedAt ? (nowTs - startedAt) / 1000 : 0;
   const balance = mode === "paper" ? Number(paperState?.cashUSDT) : Number(walletUSDT?.availableToWithdraw ?? walletUSDT?.availableBalance);

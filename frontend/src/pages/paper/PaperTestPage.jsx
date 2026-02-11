@@ -24,11 +24,6 @@ export function PaperTestPage() {
 
   const presets = app.presets || [];
 
-  useEffect(() => {
-    const t = setInterval(() => setTick((x) => x + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-
   const learning = app.paperTest?.learning || {};
   const currentThresholds = app.paperTest?.currentThresholds || {};
   const summary = app.paperTest?.summary || {};
@@ -37,7 +32,15 @@ export function PaperTestPage() {
 
   const startedAt = Number(summary.startedAt || app.paperTest?.startedAt || 0);
   const endsAt = Number(summary.endsAt || app.paperTest?.endsAt || 0);
-  const now = Date.now() + tick * 0;
+  const now = Date.now();
+  void tick;
+
+  useEffect(() => {
+    if (!isRunning) return undefined;
+    const t = setInterval(() => setTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [isRunning]);
+
   const durationSec = isRunning
     ? (startedAt ? Math.max(0, (now - startedAt) / 1000) : 0)
     : (startedAt && endsAt ? Math.max(0, (endsAt - startedAt) / 1000) : Number(summary.durationSec || 0));
@@ -67,7 +70,7 @@ export function PaperTestPage() {
       </Card></Col>
 
       <Col md={12}><Card body><h6 className="mb-2">Текущие пороги (runtime)</h6>
-        <div className="small">minCorr=<b>{Number(currentThresholds.minCorr || 0).toFixed(3)}</b> • impulseZ=<b>{Number(currentThresholds.impulseZ || 0).toFixed(2)}</b> • edgeMult=<b>{Number(currentThresholds.edgeMult || 0).toFixed(2)}</b> • confirmZ=<b>{Number(currentThresholds.confirmZ || 0).toFixed(2)}</b></div>
+        <div className="small">minCorr=<b>{Number(currentThresholds.minCorr || 0).toFixed(3)}</b> • impulseZ=<b>{Number(currentThresholds.impulseZ || 0).toFixed(2)}</b> • minEdgeBps=<b>{Number(currentThresholds.minEdgeBps || 0).toFixed(2)}</b> • confirmZ=<b>{Number(currentThresholds.confirmZ || 0).toFixed(2)}</b></div>
       </Card></Col>
 
       <Col md={12}><Card body><h6 className="mb-2">Сводка</h6>

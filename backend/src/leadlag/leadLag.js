@@ -69,7 +69,7 @@ function sliceAlignedForLag(leaderR, followerR, lag) {
 
 export function computeLeadLagPairs({
   returnsBySymbol,
-  barMs = 250,
+  barMs = 1000,
   windowBars = 240,
   maxLagBars = 20,
   minBars = 120,

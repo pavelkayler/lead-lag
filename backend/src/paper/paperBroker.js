@@ -57,6 +57,33 @@ export class PaperBroker {
     if (this.equityPoints.length > 10_000) this.equityPoints.shift();
   }
 
+  _realizeCloseChunk(pos, closeMid, closeNotional, reason = "chunk") {
+    const notional = Math.max(0, Number(closeNotional) || 0);
+    if (notional <= 0 || !Number.isFinite(Number(closeMid)) || Number(closeMid) <= 0) {
+      return { grossPnl: 0, feeOut: 0, slipOut: 0, netDelta: 0, qtyCoinClosed: 0, qtyUSDTClosed: 0, reason };
+    }
+    const qtyCoinClosed = pos.qtyCoin > 0 && pos.qtyUSDT > 0 ? (pos.qtyCoin * (notional / pos.qtyUSDT)) : 0;
+    const grossPnl = pos.side === "Buy"
+      ? (Number(closeMid) - pos.entryMid) * qtyCoinClosed
+      : (pos.entryMid - Number(closeMid)) * qtyCoinClosed;
+    const feeOut = this._fee(notional);
+    const slipOut = this._slippageUSDT(notional);
+
+    this.stats.feesUSDT += feeOut;
+    this.stats.slippageUSDT += slipOut;
+    this.cashUSDT += notional + grossPnl - feeOut - slipOut;
+
+    return {
+      grossPnl,
+      feeOut,
+      slipOut,
+      netDelta: grossPnl - feeOut - slipOut,
+      qtyCoinClosed,
+      qtyUSDTClosed: notional,
+      reason,
+    };
+  }
+
   open({ symbol, side, entryMid, qtyUSDT, tpR, tpR1, tpR2, slR, maxHoldBars = 20, meta = {} }) {
     if (this.position) throw new Error("paper: позиция уже открыта");
     if (!symbol) throw new Error("paper: symbol required");
@@ -89,11 +116,18 @@ export class PaperBroker {
       tpR2: Math.max(0, Number(tpR2 ?? tpR) || 0),
       slR: Math.max(0, Number(slR) || 0),
       tp1Hit: false,
+      tp1Frac: Math.min(0.95, Math.max(0.05, Number(meta?.tp1Frac) || 0.6)),
       stopAtEntry: false,
+      entryFeeUSDT: feeIn,
+      entrySlippageUSDT: slipIn,
+      realizedPnlBeforeFinal: 0,
+      realizedFeesUSDT: 0,
+      realizedSlippageUSDT: 0,
       meta,
       feesUSDT: feeIn,
       slippageUSDT: slipIn,
     };
+    this.logger?.log("paper_position_open", { event: "POSITION_OPEN", symbol, side, qtyUSDT: notional, entryMid: mid, tpR1: this.position.tpR1, tpR2: this.position.tpR2, slR: this.position.slR, maxHoldBars: this.position.maxHoldBars, meta });
     this._markEquity(mid);
     return this.position;
   }
@@ -120,15 +154,42 @@ export class PaperBroker {
     const shouldExitByTime = pos.holdBars >= pos.maxHoldBars;
     const heldMs = this.lastUpdateTs - pos.entryTs;
 
+    if (!pos.tp1Hit && pos.tpR1 > 0) {
+      const tp1Reached = (pos.side === "Buy" && r >= pos.tpR1) || (pos.side === "Sell" && r <= -pos.tpR1);
+      if (tp1Reached) {
+        const tp1Notional = Math.min(pos.qtyUSDT, Math.max(0, pos.qtyUSDT * pos.tp1Frac));
+        const chunk = this._realizeCloseChunk(pos, m, tp1Notional, "tp1");
+        pos.qtyUSDT = Math.max(0, pos.qtyUSDT - chunk.qtyUSDTClosed);
+        pos.qtyCoin = Math.max(0, pos.qtyCoin - chunk.qtyCoinClosed);
+        pos.realizedPnlBeforeFinal += chunk.grossPnl;
+        pos.realizedFeesUSDT += chunk.feeOut;
+        pos.realizedSlippageUSDT += chunk.slipOut;
+        pos.tp1Hit = true;
+        pos.stopAtEntry = true;
+        this.logger?.log("paper_tp1_hit", {
+          event: "TP1_HIT",
+          symbol: pos.symbol,
+          side: pos.side,
+          tp1Frac: pos.tp1Frac,
+          exitMid: m,
+          qtyUSDTClosed: chunk.qtyUSDTClosed,
+          qtyUSDTLeft: pos.qtyUSDT,
+          netDeltaUSDT: chunk.netDelta,
+          stopAtEntry: pos.stopAtEntry,
+        });
+        if (pos.qtyUSDT <= 1e-9 || pos.qtyCoin <= 1e-12) return this.close(m, "tp1_full");
+      }
+    }
+
     let exitReason = null;
     if (pos.stopAtEntry && heldMs >= 250) {
       if ((pos.side === "Buy" && r <= 0) || (pos.side === "Sell" && r >= 0)) exitReason = "be";
     }
     if (pos.side === "Buy") {
-      if (!exitReason && pos.tpR > 0 && r >= pos.tpR) exitReason = "tp";
+      if (!exitReason && pos.tpR2 > 0 && r >= pos.tpR2) exitReason = "tp2";
       else if (!exitReason && pos.slR > 0 && r <= -pos.slR) exitReason = "sl";
     } else {
-      if (!exitReason && pos.tpR > 0 && r <= -pos.tpR) exitReason = "tp";
+      if (!exitReason && pos.tpR2 > 0 && r <= -pos.tpR2) exitReason = "tp2";
       else if (!exitReason && pos.slR > 0 && r >= pos.slR) exitReason = "sl";
     }
     if (!exitReason && shouldExitByTime) exitReason = "time";
@@ -158,16 +219,12 @@ export class PaperBroker {
     const m = Number(exitMid);
     if (!Number.isFinite(m) || m <= 0) throw new Error("paper: exitMid invalid");
 
-    const grossPnl = pos.side === "Buy" ? (m - pos.entryMid) * pos.qtyCoin : (pos.entryMid - m) * pos.qtyCoin;
-    const feeOut = this._fee(pos.qtyUSDT);
-    const slipOut = this._slippageUSDT(pos.qtyUSDT);
-    this.stats.feesUSDT += feeOut;
-    this.stats.slippageUSDT += slipOut;
-
-    const totalCosts = pos.feesUSDT + pos.slippageUSDT + feeOut + slipOut;
+    const chunk = this._realizeCloseChunk(pos, m, pos.qtyUSDT, reason);
+    const grossPnl = Number(pos.realizedPnlBeforeFinal || 0) + chunk.grossPnl;
+    const feesTotal = Number(pos.entryFeeUSDT || 0) + Number(pos.realizedFeesUSDT || 0) + chunk.feeOut;
+    const slippageTotal = Number(pos.entrySlippageUSDT || 0) + Number(pos.realizedSlippageUSDT || 0) + chunk.slipOut;
+    const totalCosts = feesTotal + slippageTotal;
     const netPnl = grossPnl - totalCosts;
-
-    this.cashUSDT += pos.qtyUSDT + grossPnl - feeOut - slipOut;
 
     const trade = {
       ts: Date.now(),
@@ -178,10 +235,10 @@ export class PaperBroker {
       side: pos.side,
       entryMid: pos.entryMid,
       exitMid: m,
-      qtyUSDT: pos.qtyUSDT,
+      qtyUSDT: (Number(pos.meta?.initialQtyUSDT) || 0) > 0 ? Number(pos.meta.initialQtyUSDT) : (Number(pos.qtyUSDT) + Number(chunk.qtyUSDTClosed)),
       grossPnlUSDT: grossPnl,
-      feesUSDT: pos.feesUSDT + feeOut,
-      slippageUSDT: pos.slippageUSDT + slipOut,
+      feesUSDT: feesTotal,
+      slippageUSDT: slippageTotal,
       pnlUSDT: netPnl,
       reason,
       holdBars: pos.holdBars,
@@ -191,8 +248,8 @@ export class PaperBroker {
       slR: pos.slR,
       tp1Hit: !!pos.tp1Hit,
       stopAtEntry: !!pos.stopAtEntry,
-      riskUSDT: Math.max(1e-9, pos.qtyUSDT * (pos.slR || 0)),
-      rMultiple: (pos.slR > 0) ? netPnl / (pos.qtyUSDT * pos.slR) : 0,
+      riskUSDT: Math.max(1e-9, (Number(pos.meta?.initialQtyUSDT) || (Number(pos.qtyUSDT) + Number(chunk.qtyUSDTClosed))) * (pos.slR || 0)),
+      rMultiple: (pos.slR > 0) ? netPnl / (Math.max(1e-9, (Number(pos.meta?.initialQtyUSDT) || (Number(pos.qtyUSDT) + Number(chunk.qtyUSDTClosed))) * pos.slR)) : 0,
       meta: pos.meta,
       isRiskEntry: !!pos?.meta?.isRiskEntry,
     };
@@ -203,6 +260,19 @@ export class PaperBroker {
     this.stats.pnlUSDT += trade.pnlUSDT;
     this.stats.grossPnlUSDT += trade.grossPnlUSDT;
     if (trade.pnlUSDT >= 0) this.stats.wins += 1; else this.stats.losses += 1;
+
+    this.logger?.log("paper_position_close", {
+      event: reason === "tp2" ? "TP2_HIT" : (reason === "sl" ? "SL_HIT" : "POSITION_CLOSE"),
+      symbol: trade.symbol,
+      side: trade.side,
+      reason,
+      pnlUSDT: trade.pnlUSDT,
+      grossPnlUSDT: trade.grossPnlUSDT,
+      feesUSDT: trade.feesUSDT,
+      slippageUSDT: trade.slippageUSDT,
+      tp1Hit: trade.tp1Hit,
+      holdBars: trade.holdBars,
+    });
 
     this.position = null;
     this.equityUSDT = this.cashUSDT;

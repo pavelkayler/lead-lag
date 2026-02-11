@@ -58,7 +58,7 @@ export class LeadLagService {
     };
   }
 
-  constructor({ feed, hub, logger = null, intervalMs = 2000, windowBars = 240, maxLagBars = 20, minBars = 120 } = {}) {
+  constructor({ feed, hub, logger = null, intervalMs = 2000, windowBars = 120, maxLagBars = 12, minBars = 60 } = {}) {
     this.feed = feed;
     this.hub = hub;
     this.logger = logger;
@@ -104,7 +104,7 @@ export class LeadLagService {
 
     const res = computeLeadLagPairs({
       returnsBySymbol,
-      barMs: this.feed.barMs || 250,
+      barMs: this.feed.barMs || 1000,
       windowBars: this.windowBars,
       maxLagBars: this.maxLagBars,
       minBars: this.minBars,

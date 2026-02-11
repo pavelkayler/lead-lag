@@ -9,8 +9,6 @@ const ROUTE_TOPICS = {
   "/": ["price", "leadlag", "metrics", "feedStatus"],
   "/paper": ["paperTest"],
   "/hedge": ["tradeState", "bar"],
-  "/demo": ["tradeState", "price"],
-  "/real": ["tradeState", "price"],
   "/presets": [],
   "/range-metrics": ["rangeMetrics"],
   "/boundary-flip": ["boundaryFlipBot"],
@@ -255,7 +253,7 @@ export function AppProviders({ children }) {
           if (res.ok) setPaperTest(await res.json());
           return;
         }
-        if (["/hedge", "/demo", "/real"].includes(activePath)) {
+        if (["/hedge"].includes(activePath)) {
           await getTradeState({ maxOrders: 100, maxExecutions: 100 });
         }
         if (activePath === "/range-metrics") {

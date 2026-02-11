@@ -30,9 +30,9 @@ const DEFAULT_PRESET = {
     targetMinTradesPerHour: 1,
     bounds: {
       minCorr: { floor: 0.05, ceil: 0.4 },
-      impulseZ: { floor: 1.2, ceil: 4 },
+      impulseZ: { floor: 1.6, ceil: 4 },
       confirmZ: { floor: 0.05, ceil: 1 },
-      edgeMult: { floor: 1.5, ceil: 8 },
+      edgeMult: { floor: 2.5, ceil: 8 },
     },
   },
 };
@@ -80,8 +80,9 @@ export class PaperTestRunner {
     this.instances = new Map();
     this.lastNoTradeAt = Date.now();
     this.lastWaitLogAt = 0;
-    this.lastStrictnessTuneAt = 0;
     this.lastSessionTuneAt = 0;
+    this.rejectWindowMs = 10 * 60 * 1000;
+    this.rejectWindow = [];
     this.presetsCatalog = clone(DEFAULT_PRESETS);
     this.presetStats = {};
     this.sessionWorkingPreset = new Map();
@@ -108,6 +109,23 @@ export class PaperTestRunner {
   _allBrokers() {
     if (this.instances.size) return Array.from(this.instances.values()).map((x) => x.broker);
     return [this.broker];
+  }
+
+
+  _activeStrategies() {
+    if (this.instances.size) return Array.from(this.instances.values()).map((x) => x.strategy).filter(Boolean);
+    return this.strategy ? [this.strategy] : [];
+  }
+
+  _currentThresholds() {
+    const sample = this._activeStrategies()[0];
+    const p = sample?.getParams?.() || this.status?.currentPreset || {};
+    return {
+      minCorr: Number(p.minCorr || 0),
+      impulseZ: Number(p.impulseZ || 0),
+      edgeMult: Number(p.edgeMult || 0),
+      confirmZ: Number(p.minFollowerConfirmZ || 0),
+    };
   }
 
   _aggregateSummary() {
@@ -195,6 +213,7 @@ export class PaperTestRunner {
       trades: this._allTrades().slice(0, 200),
       runningSettingsHash: this.advisor.runningSettingsHash,
       settingsHash: this.advisor.lastSettingsHash,
+      currentThresholds: this._currentThresholds(),
     };
   }
 
@@ -228,19 +247,24 @@ export class PaperTestRunner {
     const counters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
     const distances = { corrFail: [], impulseFail: [], edgeGateFail: [], confirmFail: [] };
     let status = "Сканирую пары…";
+    const samples = { impulseFail: null, edgeGateFail: null };
     for (const it of this.instances.values()) {
       const rs = it.strategy?.consumeRejectStats?.() || {};
       for (const [k, v] of Object.entries(rs.counters || {})) counters[k] += Number(v || 0);
       for (const [k, arr] of Object.entries(rs.distance || {})) if (Array.isArray(arr) && distances[k]) distances[k].push(...arr.map((x) => Number(x)).filter(Number.isFinite));
       if (rs.runtimeStatus) status = rs.runtimeStatus;
+      if (rs.samples?.impulseFail) samples.impulseFail = rs.samples.impulseFail;
+      if (rs.samples?.edgeGateFail) samples.edgeGateFail = rs.samples.edgeGateFail;
     }
     if (!this.instances.size) {
       const rs = this.strategy?.consumeRejectStats?.() || {};
       for (const [k, v] of Object.entries(rs.counters || {})) counters[k] += Number(v || 0);
       for (const [k, arr] of Object.entries(rs.distance || {})) if (Array.isArray(arr) && distances[k]) distances[k].push(...arr.map((x) => Number(x)).filter(Number.isFinite));
       if (rs.runtimeStatus) status = rs.runtimeStatus;
+      if (rs.samples?.impulseFail) samples.impulseFail = rs.samples.impulseFail;
+      if (rs.samples?.edgeGateFail) samples.edgeGateFail = rs.samples.edgeGateFail;
     }
-    return { counters, status };
+    return { counters, distances, samples, status };
   }
 
   _shouldLogOnce(key, ttlMs = 4000) {
@@ -266,98 +290,109 @@ export class PaperTestRunner {
     const now = Date.now();
     if ((now - this.lastWaitLogAt) < 10_000) return;
     if ((now - this.lastNoTradeAt) < 10_000) return;
-    const { counters, status } = this._collectRejectReasons();
-    const parts = Object.entries(counters).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} (x${v})`);
-    const sample = this.instances.size ? Array.from(this.instances.values())[0]?.strategy : this.strategy;
-    const p = sample?.getParams?.() || {};
-    const message = `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.minFollowerConfirmZ || 0).toFixed(2)}. ${status}. Следующий шаг: ждём подтверждённый импульс лидера и сигнал фолловера.`;
+    const { counters, samples, status } = this._collectRejectReasons();
+    this.rejectWindow.push({ ts: now, counters });
+    this.rejectWindow = this.rejectWindow.filter((x) => (now - Number(x.ts || 0)) <= this.rejectWindowMs);
+
+    const parts = Object.entries(counters)
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([k, v]) => `${k} (x${v})`);
+    const p = this._currentThresholds();
+    const explain = [];
+    if (samples?.impulseFail) explain.push(`impulseFail: z=${Number(samples.impulseFail.impulseZNow || 0).toFixed(2)} < ${Number(samples.impulseFail.impulseZThr || 0).toFixed(2)}`);
+    if (samples?.edgeGateFail) explain.push(`edgeGateFail: edge=${Number(samples.edgeGateFail.edgeNow || 0).toFixed(3)} < ${Number(samples.edgeGateFail.edgeThr || 0).toFixed(3)}`);
+    const message = `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.confirmZ || 0).toFixed(2)}. ${explain.join("; ") || "distance-to-pass: n/a"}. ${status}.`;
     const dedupKey = this._dedupLogKey({ type: "WAIT", text: message });
     if ((this.lastWaitMessage !== message && this._shouldLogOnce(dedupKey, 3000)) || (now - this.lastWaitLogAt) >= 10_000) {
       this.advisor.logEvent("wait", message);
       this.lastWaitMessage = message;
     }
-    if ((now - this.lastStrictnessTuneAt) > 30_000) {
-      this.lastStrictnessTuneAt = now;
-      const targets = this.instances.size ? Array.from(this.instances.values()) : [{ strategy: this.strategy, preset: this.status.currentPreset || this.presetsCatalog[0] }];
-      for (const it of targets) {
-        const cur = Number(it.strategy?.getParams?.().entryStrictness ?? it.preset.entryStrictness ?? 65);
-        if (cur > 15) {
-          const next = Math.max(10, cur - 5);
-          const currentName = String(it.preset?.name || "");
-          const baseName = currentName.includes(" @ ") ? currentName.split(" @ ")[0] : currentName;
-          const workingName = this.sessionWorkingPreset.get(baseName) || currentName;
-          const tuned = { ...it.preset, name: workingName, entryStrictness: next, blacklistSymbols: [...(it.preset.blacklistSymbols || [])] };
-          this.upsertPreset(tuned);
-          it.preset = tuned;
-          it.strategy.setParams({ ...tuned, name: tuned.name, fixedLeaders: tuned?.useFixedLeaders ? ["BTCUSDT", "ETHUSDT", "SOLUSDT"] : null });
-          this.advisor.logEvent("strictness", `Обновлён рабочий пресет ${tuned.name}: {entryStrictness:${cur}->${next}}`);
-        }
-      }
-      this.status.presets = this.listPresets();
-      this._broadcast();
-    }
     this.lastWaitLogAt = now;
   }
-
 
 
   _runSessionAutoTune(usePresets = [], multiStrategy = false) {
     const cfg = this.status?.autoTuneConfig || {};
     if (!cfg.enabled) return usePresets;
     const now = Date.now();
-    const startedAt = Number(this.status?.startedAt || now);
-    if ((now - startedAt) < (Number(cfg.startTuningAfterMin || 12) * 60 * 1000)) return usePresets;
     if ((now - this.lastSessionTuneAt) < (Number(cfg.tuningIntervalSec || 90) * 1000)) return usePresets;
+
     const summary = this._aggregateSummary();
-    if (Number(summary.trades || 0) > 0) return usePresets;
+    if (Number(summary.trades || 0) > 0 || this.status?.state !== "RUNNING_WAITING") return usePresets;
 
-    const { counters, distances } = this._collectRejectReasons();
-    const ranked = Object.entries(counters).filter(([k,v]) => ["corrFail","impulseFail","edgeGateFail","confirmFail"].includes(k) && Number(v)>0).sort((a,b)=>b[1]-a[1]);
-    if (!ranked.length) return usePresets;
-    const [blocker, cnt] = ranked[0];
-    const target = this.status.currentPreset || usePresets[0];
-    if (!target) return usePresets;
+    const windowStart = now - this.rejectWindowMs;
+    const totals = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
+    for (const row of this.rejectWindow) {
+      if (Number(row.ts || 0) < windowStart) continue;
+      for (const [k, v] of Object.entries(row.counters || {})) totals[k] = Number(totals[k] || 0) + Number(v || 0);
+    }
+    const blocksTotal = Object.values(totals).reduce((a, v) => a + Number(v || 0), 0);
+    if (blocksTotal <= 0) return usePresets;
 
-    const bounds = cfg.bounds || {};
-    const tuned = { ...target };
-    let from = null; let to = null; let key = null;
-    if (blocker === "corrFail") {
-      key = "minCorr";
-      const b = bounds.minCorr || {};
-      from = Number(target.minCorr || 0.15);
-      to = Math.max(Number(b.floor ?? 0.05), from - 0.02);
-    } else if (blocker === "impulseFail") {
-      key = "impulseZ";
-      const b = bounds.impulseZ || {};
-      from = Number(target.impulseZ || 2.5);
-      to = Math.max(Number(b.floor ?? 1.2), from - 0.15);
-    } else if (blocker === "confirmFail") {
-      key = "minFollowerConfirmZ";
-      const b = bounds.confirmZ || {};
-      from = Number(target.minFollowerConfirmZ || 0.25);
-      to = Math.max(Number(b.floor ?? 0.05), from - 0.05);
-    } else if (blocker === "edgeGateFail") {
-      key = "edgeMult";
-      const b = bounds.edgeMult || {};
-      from = Number(target.edgeMult || 5);
-      to = Math.max(Number(b.floor ?? 1.5), from - 0.3);
+    const impulseShare = Number(totals.impulseFail || 0) / blocksTotal;
+    const edgeShare = Number(totals.edgeGateFail || 0) / blocksTotal;
+    let blocker = null;
+    if (impulseShare > 0.6) blocker = "impulseFail";
+    else if (edgeShare > 0.4) blocker = "edgeGateFail";
+    if (!blocker) return usePresets;
+
+    const targets = this.instances.size ? Array.from(this.instances.values()).map((x) => ({ strategy: x.strategy, preset: x.preset })) : [{ strategy: this.strategy, preset: this.status.currentPreset || usePresets[0] }];
+    let changed = false;
+
+    for (const t of targets) {
+      const strategy = t.strategy;
+      const preset = t.preset || {};
+      if (!strategy?.getParams || !strategy?.setParams) continue;
+      const params = strategy.getParams();
+      if (blocker === "impulseFail") {
+        const floor = Number(cfg?.bounds?.impulseZ?.floor ?? 1.6);
+        const step = Number(cfg?.stepImpulseZ ?? 0.2);
+        const from = Number(params.impulseZ || 2.5);
+        const to = Math.max(floor, from - step);
+        if (to >= from) {
+          this.advisor.logEvent("auto-tune", `[AUTO-TUNE] достигнут минимум impulseZ=${from.toFixed(2)}, дальше не смягчаю`);
+          continue;
+        }
+        strategy.setParams({ impulseZ: Number(to.toFixed(4)) });
+        t.preset = { ...preset, impulseZ: Number(to.toFixed(4)) };
+        this.advisor.logEvent("auto-tune", `[AUTO-TUNE] impulseZ ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: impulseFail ${(impulseShare * 100).toFixed(0)}% / 10m)`);
+        changed = true;
+      }
+      if (blocker === "edgeGateFail") {
+        const floor = Number(cfg?.bounds?.edgeMult?.floor ?? 2.5);
+        const step = Number(cfg?.stepEdgeMult ?? 0.5);
+        const from = Number(params.edgeMult || 5);
+        const to = Math.max(floor, from - step);
+        if (to >= from) {
+          this.advisor.logEvent("auto-tune", `[AUTO-TUNE] достигнут минимум edgeMult=${from.toFixed(2)}, дальше не смягчаю`);
+          continue;
+        }
+        strategy.setParams({ edgeMult: Number(to.toFixed(4)) });
+        t.preset = { ...preset, edgeMult: Number(to.toFixed(4)) };
+        this.advisor.logEvent("auto-tune", `[AUTO-TUNE] edgeMult ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: edgeGateFail ${(edgeShare * 100).toFixed(0)}% / 10m)`);
+        changed = true;
+      }
+      if (changed) break;
     }
-    if (!key || !Number.isFinite(from) || !Number.isFinite(to) || to >= from) {
-      this.advisor.logEvent("auto-tune", `[AUTO-TUNE] достигнут предел, дальше не смягчаю (${blocker})`);
-      this.lastSessionTuneAt = now;
-      return usePresets;
-    }
-    tuned[key] = Number(to.toFixed(4));
-    this.upsertPreset(tuned);
-    const med = ((distances?.[blocker] || []).sort((a,b)=>a-b)[Math.floor((distances?.[blocker] || []).length/2)] ?? null);
-    this.advisor.logEvent("auto-tune", `[AUTO-TUNE] ${key} ${from.toFixed(3)} -> ${Number(tuned[key]).toFixed(3)} (reason: ${blocker} ${cnt}, median distance=${med == null ? "n/a" : Number(med).toFixed(4)})`);
+
     this.lastSessionTuneAt = now;
+    if (!changed) return usePresets;
 
-    if (!multiStrategy && this.strategy?.setParams) {
-      this.status.currentPreset = tuned;
-      this.strategy.setParams({ ...tuned, enabled: true, name: tuned.name, allowedSources: Array.from(this.strategy.allowedSources || ["BT"]) });
+    const nextPresets = usePresets.map((p) => ({ ...p }));
+    for (let i = 0; i < nextPresets.length; i++) {
+      const x = targets.find((t) => t.preset?.name === nextPresets[i].name);
+      if (x?.preset) {
+        nextPresets[i] = { ...nextPresets[i], ...x.preset };
+        this.upsertPreset(nextPresets[i]);
+      }
     }
-    return usePresets.map((p) => p.name === tuned.name ? tuned : p);
+
+    if (!multiStrategy) this.status.currentPreset = nextPresets[0] || this.status.currentPreset;
+    this.status.presets = this.listPresets();
+    this._broadcast();
+    return nextPresets;
   }
 
   _persistPresets() {
@@ -411,7 +446,7 @@ export class PaperTestRunner {
     return this.listPresets();
   }
 
-  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 300, minMarketCapUsd = 10_000_000, presets = null, multiStrategy = false, exploitBest = false, testOnlyPresetName = null, isolatedPresetName = null, useBybit = true, useBinance = true } = {}) {
+  async start({ durationHours = 8, rotateEveryMinutes = 60, symbolsCount = 300, minMarketCapUsd = 10_000_000, presets = null, multiStrategy = false, exploitBest = false, testOnlyPresetName = null, isolatedPresetName = null, useBybit = true, useBinance = true, debugAllowEntryWithoutImpulse = false, debugEntryCooldownMin = 45 } = {}) {
     if (this.running) return this.getStatus();
     this.running = true;
     this.stopRequested = false;
@@ -464,7 +499,7 @@ export class PaperTestRunner {
       for (const preset of usePresets) {
         const broker = new PaperBroker({ logger: this.logger });
         const strategy = new LeadLagPaperStrategy({ feed: this.feed, leadLag: this.leadLag, broker, hub: this.hub, logger: this.logger });
-        strategy.setParams({ ...preset, enabled: true, name: preset.name, allowedSources, fixedLeaders: preset?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null });
+        strategy.setParams({ ...preset, enabled: true, name: preset.name, allowedSources, fixedLeaders: preset?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
         strategy.onAutoExclude = (ev) => this._handleAutoExclude(ev);
         strategy.enable(true);
         strategy.start();
@@ -472,7 +507,7 @@ export class PaperTestRunner {
       }
     } else {
       this.instances.clear();
-      this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name, allowedSources, fixedLeaders: usePresets[0]?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null });
+      this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name, allowedSources, fixedLeaders: usePresets[0]?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
       this.strategy.onAutoExclude = (ev) => this._handleAutoExclude(ev);
       this.strategy.enable(true);
     }
@@ -484,6 +519,8 @@ export class PaperTestRunner {
       startTuningAfterMin: Number(presetTune?.startTuningAfterMin || 12),
       tuningIntervalSec: Number(presetTune?.tuningIntervalSec || 90),
       targetMinTradesPerHour: Number(presetTune?.targetMinTradesPerHour || 1),
+      stepImpulseZ: Number(presetTune?.stepImpulseZ || 0.2),
+      stepEdgeMult: Number(presetTune?.stepEdgeMult || 0.5),
       bounds: presetTune?.bounds || {},
     };
 
@@ -509,6 +546,7 @@ export class PaperTestRunner {
     this.advisor.markRunningSettingsHash(usePresets);
     this.lastNoTradeAt = Date.now();
     this.lastWaitLogAt = 0;
+    this.rejectWindow = [];
     this._writeLatest("Running");
     this._broadcast();
 
@@ -521,7 +559,7 @@ export class PaperTestRunner {
           if (!multiStrategy) {
             const preset = usePresets[i % usePresets.length];
             this.status.currentPreset = preset;
-            this.strategy.setParams({ ...preset, enabled: true, name: preset.name, allowedSources, fixedLeaders: preset?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null });
+            this.strategy.setParams({ ...preset, enabled: true, name: preset.name, allowedSources, fixedLeaders: preset?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
           }
 
           const before = this._aggregateSummary();

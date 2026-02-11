@@ -19,6 +19,8 @@ export function PaperTestPage() {
   const [useBinance, setUseBinance] = useState(true);
   const [showToast, setShowToast] = useState(false);
   const [tick, setTick] = useState(0);
+  const [debugAllowEntryWithoutImpulse, setDebugAllowEntryWithoutImpulse] = useState(false);
+  const [debugEntryCooldownMin, setDebugEntryCooldownMin] = useState(45);
 
   const presets = app.presets || [];
 
@@ -28,6 +30,7 @@ export function PaperTestPage() {
   }, []);
 
   const learning = app.paperTest?.learning || {};
+  const currentThresholds = app.paperTest?.currentThresholds || {};
   const summary = app.paperTest?.summary || {};
   const learningState = learning.state || app.paperTest?.state || "STOPPED";
   const isRunning = learningState === "RUNNING" || learningState === "RUNNING_WAITING" || learningState === "RUNNING_IN_TRADE";
@@ -40,7 +43,7 @@ export function PaperTestPage() {
     : (startedAt && endsAt ? Math.max(0, (endsAt - startedAt) / 1000) : Number(summary.durationSec || 0));
 
   const start = async () => {
-    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, multiStrategy: false, exploitBest, testOnlyPresetName: isolatedPresetName || null, useBybit, useBinance });
+    const res = await app.startPaperTest({ durationHours, rotateEveryMinutes: 60, symbolsCount: 100, minMarketCapUsd: 10_000_000, multiStrategy: false, exploitBest, testOnlyPresetName: isolatedPresetName || null, useBybit, useBinance, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
     if (res?.queued) setShowToast(true);
   };
 
@@ -58,8 +61,13 @@ export function PaperTestPage() {
         <Form.Label className="mb-1">Длительность (часы): {durationHours}</Form.Label><Form.Range min={1} max={24} value={durationHours} onChange={(e) => setDurationHours(Number(e.target.value))} />
         <div className="mb-2"><Form.Check type="checkbox" label="Эксплуатация лучшего" checked={exploitBest} onChange={(e) => setExploitBest(e.target.checked)} /></div>
         <div className="mb-2 d-flex gap-3 flex-wrap"><Form.Check type="checkbox" label="Use Bybit (BT)" checked={useBybit} onChange={(e) => setUseBybit(e.target.checked)} /><Form.Check type="checkbox" label="Use Binance (BNB)" checked={useBinance} onChange={(e) => setUseBinance(e.target.checked)} /></div>
+        <div className="mb-2 d-flex gap-3 flex-wrap align-items-center"><Form.Check type="checkbox" label="Debug: разрешить вход без импульса" checked={debugAllowEntryWithoutImpulse} onChange={(e) => setDebugAllowEntryWithoutImpulse(e.target.checked)} /><div style={{ minWidth: 240 }}><Form.Label className="mb-1">Debug cooldown (мин)</Form.Label><Form.Control type="number" min={30} max={120} step={5} value={debugEntryCooldownMin} onChange={(e) => setDebugEntryCooldownMin(Number(e.target.value) || 45)} /></div></div>
         <Form.Group className="mb-2"><Form.Label>Тестировать только</Form.Label><Form.Select value={isolatedPresetName} onChange={(e) => setIsolatedPresetName(e.target.value)} style={{ maxWidth: 340 }}><option value="">Все пресеты (обычный режим)</option>{presets.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</Form.Select></Form.Group>
         <div className="d-flex gap-2 flex-wrap"><Button onClick={() => start().catch(() => {})}>Запустить тест</Button><Button variant="outline-danger" onClick={() => app.stopPaperTest().catch(() => {})}>Остановить</Button><Button variant="outline-secondary" onClick={() => app.sendCommand("resetLearning", {}).catch(() => {})}>Сбросить историю</Button></div>
+      </Card></Col>
+
+      <Col md={12}><Card body><h6 className="mb-2">Текущие пороги (runtime)</h6>
+        <div className="small">minCorr=<b>{Number(currentThresholds.minCorr || 0).toFixed(3)}</b> • impulseZ=<b>{Number(currentThresholds.impulseZ || 0).toFixed(2)}</b> • edgeMult=<b>{Number(currentThresholds.edgeMult || 0).toFixed(2)}</b> • confirmZ=<b>{Number(currentThresholds.confirmZ || 0).toFixed(2)}</b></div>
       </Card></Col>
 
       <Col md={12}><Card body><h6 className="mb-2">Сводка</h6>

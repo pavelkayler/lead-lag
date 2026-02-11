@@ -23,6 +23,7 @@ const DEFAULT_PRESET = {
   blacklist: [],
   useFixedLeaders: false,
   interExchangeArbitrage: true,
+  interExchangeArbEnabled: true,
   riskModeEnabled: false,
   riskLevel: 0,
   protectCoreLeaders: true,
@@ -38,6 +39,7 @@ const DEFAULT_PRESET = {
     tuningIntervalSec: 90,
     targetMinTradesPerHour: 1,
     exploreEveryFailedEvals: 100,
+    exploreEveryAttempts: 100,
     bounds: {
       minCorr: { floor: 0.05, ceil: 0.4 },
       impulseZ: { floor: 1.2, ceil: 4 },
@@ -101,7 +103,7 @@ export class PaperTestRunner {
     this.sessionWorkingPreset = new Map();
     this.lastWaitMessage = "";
     this.logDedup = new Map();
-    this.failedEvalCounter = 0;
+    this.attemptCounter = 0;
     this.nextTunePlan = "";
     fs.mkdirSync(this.resultsDir, { recursive: true });
     try {
@@ -140,6 +142,11 @@ export class PaperTestRunner {
       impulseZ: Number(p.impulseZ || 0),
       edgeMult: Number(p.edgeMult || 0),
       confirmZ: Number(p.minFollowerConfirmZ || 0),
+      gatePassCountHour: p.gatePassCountHour || {},
+      decisionRecord: p.decisionRecord || null,
+      riskMode: p.riskMode || "OFF",
+      riskImpulseMargin: Number(p.riskImpulseMargin || 0),
+      riskQtyMultiplier: Number(p.riskQtyMultiplier || 0),
     };
   }
 
@@ -297,8 +304,8 @@ export class PaperTestRunner {
     return String(hash >>> 0);
   }
 
-  _dedupLogKey({ type, symbol = "", source = "", text = "" }) {
-    return `${String(type || "GEN").toUpperCase()}:${String(symbol || "-").toUpperCase()}:${String(source || "-").toUpperCase()}:${this._hashForLog(text)}`;
+  _dedupLogKey({ level = "info", tag = "GEN", messageBase = "", symbolKey = "", reasonKey = "", thresholdSnapshotRounded = "" }) {
+    return `${String(level || "info").toUpperCase()}:${String(tag || "GEN").toUpperCase()}:${String(messageBase || "-").toUpperCase()}:${String(symbolKey || "-").toUpperCase()}:${String(reasonKey || "-").toUpperCase()}:${String(thresholdSnapshotRounded || "-")}`;
   }
 
   _emitWaitLog() {
@@ -307,7 +314,6 @@ export class PaperTestRunner {
     if ((now - this.lastNoTradeAt) < 10_000) return;
     const { counters, samples, status } = this._collectRejectReasons();
     this.rejectWindow.push({ ts: now, counters });
-    this.failedEvalCounter += Object.values(counters).reduce((a, v) => a + Number(v || 0), 0);
     this.rejectWindow = this.rejectWindow.filter((x) => (now - Number(x.ts || 0)) <= this.rejectWindowMs);
 
     const parts = Object.entries(counters)
@@ -323,8 +329,8 @@ export class PaperTestRunner {
     const neverPass = Object.entries(gatePass).filter(([,v]) => Number(v || 0) === 0).map(([k]) => k);
     const noTradeDiag = neverPass.length ? ` NO_TRADE: gates never pass -> ${neverPass.join(",")}.` : "";
     const message = `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.confirmZ || 0).toFixed(2)}. ${explain.join("; ") || "distance-to-pass: n/a"}. Следующий шаг: ${this.nextTunePlan || "ожидание"}.${noTradeDiag} ${status}.`;
-    const dedupKey = this._dedupLogKey({ type: "WAIT", text: message });
-    if ((this.lastWaitMessage !== message && this._shouldLogOnce(dedupKey, 3000)) || (now - this.lastWaitLogAt) >= 10_000) {
+    const dedupKey = this._dedupLogKey({ level: "info", tag: "WAIT", messageBase: parts.join("|"), reasonKey: parts[0] || "none", thresholdSnapshotRounded: `${Number(p.minCorr || 0).toFixed(3)}:${Number(p.impulseZ || 0).toFixed(2)}:${Number(p.edgeMult || 0).toFixed(2)}:${Number(p.confirmZ || 0).toFixed(2)}` });
+    if ((this.lastWaitMessage !== message && this._shouldLogOnce(dedupKey, 5000)) || (now - this.lastWaitLogAt) >= 10_000) {
       this.advisor.logEvent("wait", message);
       this.lastWaitMessage = message;
     }
@@ -382,7 +388,7 @@ export class PaperTestRunner {
               strategy.setParams({ impulseZ: Number(to.toFixed(4)) });
               t.preset = { ...preset, impulseZ: Number(to.toFixed(4)) };
               this.nextTunePlan = `понизить impulseZ ещё на ${step}`;
-              this.advisor.logEvent("auto-tune", `[AUTO-TUNE][exploit] impulseZ ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: trades=0, impulseFail ${(impulseShare * 100).toFixed(0)}%)`);
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLOIT] preset=${preset.name} param impulseZ ${from.toFixed(2)}->${to.toFixed(2)} reason=impulseFail ${(impulseShare * 100).toFixed(0)}% window=${Math.round(this.rejectWindowMs/1000)}s`);
               changed = true;
               break;
             }
@@ -421,7 +427,7 @@ export class PaperTestRunner {
               strategy.setParams({ edgeMult: Number(to.toFixed(4)) });
               t.preset = { ...preset, edgeMult: Number(to.toFixed(4)) };
               this.nextTunePlan = `понизить edgeMult ещё на ${step}`;
-              this.advisor.logEvent("auto-tune", `[AUTO-TUNE][exploit] edgeMult ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: trades=0, edgeGateFail ${(edgeShare * 100).toFixed(0)}%)`);
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLOIT] preset=${preset.name} param edgeMult ${from.toFixed(2)}->${to.toFixed(2)} reason=edgeGateFail ${(edgeShare * 100).toFixed(0)}% window=${Math.round(this.rejectWindowMs/1000)}s`);
               changed = true;
               break;
             }
@@ -468,9 +474,8 @@ export class PaperTestRunner {
     }
 
     if (!changed) {
-      const exploreEvery = Math.max(20, Number(cfg.exploreEveryFailedEvals || 100));
-      if (this.failedEvalCounter >= exploreEvery) {
-        this.failedEvalCounter = 0;
+      const exploreEvery = Math.max(20, Number(cfg.exploreEveryAttempts || cfg.exploreEveryFailedEvals || 100));
+      if (this.attemptCounter > 0 && (this.attemptCounter % exploreEvery) === 0) {
         for (const t of targets) {
           const strategy = t.strategy;
           const preset = t.preset || {};
@@ -484,7 +489,7 @@ export class PaperTestRunner {
           strategy.setParams(sample);
           t.preset = { ...preset, ...sample, confirmZ: sample.minFollowerConfirmZ };
           this.nextTunePlan = "случайная bounded-попытка (explore)";
-          this.advisor.logEvent("auto-tune", `[AUTO-TUNE][explore] random sample impulseZ=${sample.impulseZ}, confirmZ=${sample.minFollowerConfirmZ}, edgeMult=${sample.edgeMult}, minCorr=${sample.minCorr}`);
+          this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLORE] attempts=${this.attemptCounter} random sample impulseZ=${sample.impulseZ}, confirmZ=${sample.minFollowerConfirmZ}, edgeMult=${sample.edgeMult}, minCorr=${sample.minCorr}`);
           changed = true;
           break;
         }
@@ -741,6 +746,8 @@ export class PaperTestRunner {
           this.status.learning = this.advisor.getLearningPayload();
           this._updatePresetStats();
           this.status.topPairs = this._buildTopPairs();
+          const decision = this._activeStrategies()[0]?.getParams?.()?.decisionRecord || null;
+          if (decision && decision.tradeGate !== "WAIT_NO_CANDIDATE") this.attemptCounter += 1;
           this.status.state = this._deriveRuntimeState();
           this._writeLatest("Running");
           this._broadcast();
@@ -794,7 +801,7 @@ export class PaperTestRunner {
     const threshold = Number(ev.threshold || 100);
     const universeSize = Number(ev.universeSize || 0);
     const msg = `[EXCLUDE] ${symbol}(${source}): noMatch leader=${leader} follower=${follower} threshold=${threshold} universe=${universeSize}`;
-    const dedupKey = this._dedupLogKey({ type: "EXCLUDE", symbol, source, text: `${leader}:${follower}:${threshold}:${universeSize}` });
+    const dedupKey = this._dedupLogKey({ level: "info", tag: "EXCLUDE", symbolKey: `${symbol}|${source}`, reasonKey: "no_match_pairwise", thresholdSnapshotRounded: `${leader}:${follower}:${threshold}:${universeSize}` });
     if (this._shouldLogOnce(dedupKey, 60_000)) {
       this.advisor.logEvent("exclude", msg);
     }

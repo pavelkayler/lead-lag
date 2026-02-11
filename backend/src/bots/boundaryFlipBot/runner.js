@@ -38,7 +38,7 @@ export class BoundaryFlipBotRunner {
 
     const evt = { level, msg, mode: this.config?.mode || this.status?.mode, symbol: this.config?.symbol || this.status?.symbol, cycleId: this.status?.cycleId || 0, side: this.status?.currentSide || null, ...data };
     this.logger?.log("boundary_flip", evt);
-    this.fileLogger?.log("boundary_flip", evt);
+    this.fileLogger?.logRecord?.({ ts: Date.now(), bot: "flip", level: String(level || "info").toLowerCase(), eventType: "boundary_flip", sessionId: this.status?.startedAt || null, presetId: null, symbol: evt.symbol || null, exchange: "BYBIT", payload: evt });
     this._emit("log", evt);
   }
 

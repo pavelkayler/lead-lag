@@ -210,7 +210,8 @@ export function AppProviders({ children }) {
   const startBoundaryFlipBot = (cfg) => action("startBoundaryFlipBot", () => sendCommand("startBoundaryFlipBot", cfg || {}));
   const stopBoundaryFlipBot = () => action("stopBoundaryFlipBot", () => sendCommand("stopBoundaryFlipBot", {}));
   const getBoundaryFlipBotStatus = () => action("getBoundaryFlipBotStatus", () => sendCommand("getBoundaryFlipBotStatus", {}));
-  const getBotLogs = (bot, lines = 200) => action("getBotLogs", () => sendCommand("getBotLogs", { bot, lines }));
+  const getLogTail = (bot, lines = 200) => action("getLogTail", () => sendCommand("getLogTail", { bot, lines }));
+  const getBotLogs = (bot, lines = 200) => getLogTail(bot, lines);
 
   useEffect(() => {
     const onNav = () => setActivePath(window.location.pathname || "/");
@@ -260,7 +261,7 @@ export function AppProviders({ children }) {
         }
         if (activePath === "/boundary-flip") {
           const st = await sendCommand("getBoundaryFlipBotStatus", {});
-          const logs = await sendCommand("getBotLogs", { bot: "flipbot", lines: 200 });
+          const logs = await sendCommand("getLogTail", { bot: "flip", lines: 200 });
           setBoundaryFlip((prev) => ({ ...prev, status: st, logs: logs.lines || prev.logs }));
         }
       } catch {}
@@ -272,7 +273,7 @@ export function AppProviders({ children }) {
     wsUrl, setWsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, setUiError, activePath,
     connect, disconnect, sendCommand, subscribe, unsubscribe, setSymbols, startFeed, stopFeed, startPaperTest, stopPaperTest,
     startTrading, stopTrading, createHedgeOrders, getOpenOrders, cancelAllOrders, closeAllPositions, getTradingStatus, getTradeState, listPresets, savePreset, deletePreset,
-    startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates, startBoundaryFlipBot, stopBoundaryFlipBot, getBoundaryFlipBotStatus, getBotLogs,
+    startRangeMetrics, stopRangeMetrics, setRangeMetricsConfig, getRangeMetricsStatus, getRangeMetricsCandidates, startBoundaryFlipBot, stopBoundaryFlipBot, getBoundaryFlipBotStatus, getBotLogs, getLogTail,
   }), [wsUrl, status, clientId, feedMaxSymbols, symbols, prices, leadlag, metrics, feedStatus, bars, paperTest, presets, presetStats, tradeState, tradingStatus, rangeMetrics, boundaryFlip, uiError, activePath, connect, disconnect, sendCommand]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

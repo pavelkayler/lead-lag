@@ -36,6 +36,9 @@ export class LeadLagPaperStrategy {
     this.noMatchPairCount = new Map();
     this.autoExcludedSeries = new Set();
     this.autoExcludeNoMatchThreshold = 100;
+    this.debugAllowEntryWithoutImpulse = false;
+    this.debugEntryCooldownMin = 45;
+    this._lastDebugEntryAt = 0;
     this.baseLeaders = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
     this.onAutoExclude = null;
 
@@ -49,6 +52,7 @@ export class LeadLagPaperStrategy {
     this.currentPresetName = null;
     this.rejectCounters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
     this.rejectDistance = { corrFail: [], impulseFail: [], edgeGateFail: [], confirmFail: [] };
+    this.rejectSamples = { impulseFail: null, edgeGateFail: null };
     this.runtimeStatus = "Сканирую пары…";
   }
 
@@ -77,6 +81,8 @@ export class LeadLagPaperStrategy {
     if (p.useFixedLeaders != null) this.useFixedLeaders = !!p.useFixedLeaders;
     if (Array.isArray(p.allowedSources)) this.allowedSources = new Set(p.allowedSources.map((x) => String(x).toUpperCase()));
     if (p.autoExcludeNoMatchThreshold != null) this.autoExcludeNoMatchThreshold = Math.max(10, Math.round(n(p.autoExcludeNoMatchThreshold, this.autoExcludeNoMatchThreshold)));
+    if (p.debugAllowEntryWithoutImpulse != null) this.debugAllowEntryWithoutImpulse = !!p.debugAllowEntryWithoutImpulse;
+    if (p.debugEntryCooldownMin != null) this.debugEntryCooldownMin = Math.max(1, Math.round(n(p.debugEntryCooldownMin, this.debugEntryCooldownMin)));
     if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
     if (Array.isArray(p.blacklist)) {
       this.blacklistSymbols = new Set();
@@ -120,6 +126,8 @@ export class LeadLagPaperStrategy {
       blacklistSymbols: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])),
       blacklist: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
       autoExcludeNoMatchThreshold: this.autoExcludeNoMatchThreshold,
+      debugAllowEntryWithoutImpulse: this.debugAllowEntryWithoutImpulse,
+      debugEntryCooldownMin: this.debugEntryCooldownMin,
     };
   }
 
@@ -279,18 +287,21 @@ export class LeadLagPaperStrategy {
   }
 
 
-  _countReject(key, status = null, distanceToPass = null) {
+  _countReject(key, status = null, distanceToPass = null, sample = null) {
     if (this.rejectCounters[key] != null) this.rejectCounters[key] += 1;
     if (Number.isFinite(distanceToPass) && this.rejectDistance[key]) this.rejectDistance[key].push(Number(distanceToPass));
+    if (sample && this.rejectSamples[key] != null) this.rejectSamples[key] = sample;
     if (status) this.runtimeStatus = status;
   }
 
   consumeRejectStats() {
     const counters = { ...this.rejectCounters };
     const dist = Object.fromEntries(Object.entries(this.rejectDistance).map(([k, arr]) => [k, arr.slice()]));
+    const samples = { ...this.rejectSamples };
     this.rejectCounters = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
     this.rejectDistance = { corrFail: [], impulseFail: [], edgeGateFail: [], confirmFail: [] };
-    return { counters, distance: dist, runtimeStatus: this.runtimeStatus };
+    this.rejectSamples = { impulseFail: null, edgeGateFail: null };
+    return { counters, distance: dist, samples, runtimeStatus: this.runtimeStatus };
   }
 
   _tick() {
@@ -398,10 +409,23 @@ export class LeadLagPaperStrategy {
     if (!Number.isFinite(leaderVol) || leaderVol <= 0) return;
 
     const thr = this.impulseZ * strictFactor * leaderVol;
-    if (!this._pendingSetup && Math.abs(lastR) < thr) {
-      this._countReject("impulseFail", "Жду импульс…", thr - Math.abs(lastR));
+    const debugImpulseBypass = this.debugAllowEntryWithoutImpulse;
+    if (!this._pendingSetup && !debugImpulseBypass && Math.abs(lastR) < thr) {
+      this._countReject("impulseFail", "Жду импульс…", thr - Math.abs(lastR), {
+        impulseZNow: leaderVol > 0 ? Math.abs(lastR) / leaderVol : null,
+        impulseZThr: this.impulseZ * strictFactor,
+      });
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
       return;
+    }
+
+    if (!this._pendingSetup && debugImpulseBypass) {
+      const cooldownMs = Math.max(1, Number(this.debugEntryCooldownMin || 45)) * 60_000;
+      const waitLeft = cooldownMs - (Date.now() - Number(this._lastDebugEntryAt || 0));
+      if (waitLeft > 0) {
+        this.runtimeStatus = `Debug cooldown активен: ещё ${Math.ceil(waitLeft / 60_000)}м`;
+        return;
+      }
     }
 
     if (!this._pendingSetup) {
@@ -417,7 +441,10 @@ export class LeadLagPaperStrategy {
       const costsR = (2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0))) / 10_000;
       const edgeGateR = costsR * this.edgeMult * strictFactor;
       if (tpR2 < edgeGateR) {
-        this._countReject("edgeGateFail", "Edge gate блокирует вход…", edgeGateR - tpR2);
+        this._countReject("edgeGateFail", "Edge gate блокирует вход…", edgeGateR - tpR2, {
+          edgeNow: tpR2,
+          edgeThr: edgeGateR,
+        });
         this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, tpR2, edgeGateR, costsR, edgeMult: this.edgeMult }, `gate:edge:${leader}:${follower}`);
         return;
       }
@@ -517,6 +544,7 @@ export class LeadLagPaperStrategy {
       });
 
       this.runtimeStatus = "Сделка открыта";
+      if (this.debugAllowEntryWithoutImpulse) this._lastDebugEntryAt = Date.now();
       this.logger?.log("paper_signal", {
         event: "opened_trade",
         leader: setup.leader,
@@ -525,6 +553,7 @@ export class LeadLagPaperStrategy {
         corr: setup.corr,
         presetName: this.currentPresetName || null,
         params: this.getParams(),
+        debugImpulseBypass: this.debugAllowEntryWithoutImpulse,
         tpR1: setup.tpR1,
         tpR2: setup.tpR2,
         slR: setup.slR,

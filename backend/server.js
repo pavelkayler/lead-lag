@@ -978,9 +978,11 @@ async startPaperTest(payload) {
   const testOnlyPresetName = payload?.testOnlyPresetName ? String(payload.testOnlyPresetName) : null;
   const useBybit = payload?.useBybit !== false;
   const useBinance = payload?.useBinance !== false;
+  const debugAllowEntryWithoutImpulse = !!payload?.debugAllowEntryWithoutImpulse;
+  const debugEntryCooldownMin = Math.max(1, Number(payload?.debugEntryCooldownMin || 45));
 
   Promise.resolve().then(async () => {
-    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, testOnlyPresetName, useBybit, useBinance });
+    await paperTest.start({ durationHours, rotateEveryMinutes, symbolsCount, minMarketCapUsd, presets, multiStrategy, exploitBest, testOnlyPresetName, useBybit, useBinance, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
     hub.broadcast("tradeState", tradeState.snapshot({ maxOrders: 50, maxExecutions: 50 }));
   }).catch((e) => {
     logger?.log("paper_test_start_error", { error: String(e?.message || e) });

@@ -194,6 +194,7 @@ export class PaperBroker {
       riskUSDT: Math.max(1e-9, pos.qtyUSDT * (pos.slR || 0)),
       rMultiple: (pos.slR > 0) ? netPnl / (pos.qtyUSDT * pos.slR) : 0,
       meta: pos.meta,
+      isRiskEntry: !!pos?.meta?.isRiskEntry,
     };
 
     this.trades.unshift(trade);

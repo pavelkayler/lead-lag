@@ -38,6 +38,13 @@ export class LeadLagPaperStrategy {
     this.autoExcludeNoMatchThreshold = 100;
     this.debugAllowEntryWithoutImpulse = false;
     this.debugEntryCooldownMin = 45;
+    this.riskMode = "OFF";
+    this.riskImpulseMargin = 0.4;
+    this.riskQtyMultiplier = 0.5;
+    this.riskCooldownMin = 45;
+    this.maxRiskEntriesPerHour = 1;
+    this._lastRiskEntryAt = 0;
+    this._riskEntryHistory = [];
     this._lastDebugEntryAt = 0;
     this.baseLeaders = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
     this.onAutoExclude = null;
@@ -83,6 +90,14 @@ export class LeadLagPaperStrategy {
     if (p.autoExcludeNoMatchThreshold != null) this.autoExcludeNoMatchThreshold = Math.max(10, Math.round(n(p.autoExcludeNoMatchThreshold, this.autoExcludeNoMatchThreshold)));
     if (p.debugAllowEntryWithoutImpulse != null) this.debugAllowEntryWithoutImpulse = !!p.debugAllowEntryWithoutImpulse;
     if (p.debugEntryCooldownMin != null) this.debugEntryCooldownMin = Math.max(1, Math.round(n(p.debugEntryCooldownMin, this.debugEntryCooldownMin)));
+    if (p.riskMode != null) {
+      const mode = String(p.riskMode || "OFF").toUpperCase();
+      this.riskMode = ["OFF", "LOW", "MED", "HIGH"].includes(mode) ? mode : "OFF";
+    }
+    if (p.riskImpulseMargin != null) this.riskImpulseMargin = Math.max(0, n(p.riskImpulseMargin, this.riskImpulseMargin));
+    if (p.riskQtyMultiplier != null) this.riskQtyMultiplier = Math.min(1, Math.max(0.05, n(p.riskQtyMultiplier, this.riskQtyMultiplier)));
+    if (p.riskCooldownMin != null) this.riskCooldownMin = Math.max(1, Math.round(n(p.riskCooldownMin, this.riskCooldownMin)));
+    if (p.maxRiskEntriesPerHour != null) this.maxRiskEntriesPerHour = Math.max(1, Math.round(n(p.maxRiskEntriesPerHour, this.maxRiskEntriesPerHour)));
     if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
     if (Array.isArray(p.blacklist)) {
       this.blacklistSymbols = new Set();
@@ -128,7 +143,28 @@ export class LeadLagPaperStrategy {
       autoExcludeNoMatchThreshold: this.autoExcludeNoMatchThreshold,
       debugAllowEntryWithoutImpulse: this.debugAllowEntryWithoutImpulse,
       debugEntryCooldownMin: this.debugEntryCooldownMin,
+      riskMode: this.riskMode,
+      riskImpulseMargin: this.riskImpulseMargin,
+      riskQtyMultiplier: this.riskQtyMultiplier,
+      riskCooldownMin: this.riskCooldownMin,
+      maxRiskEntriesPerHour: this.maxRiskEntriesPerHour,
     };
+  }
+
+  _isRiskModeEnabled() {
+    return this.riskMode !== "OFF";
+  }
+
+  _canOpenRiskEntry() {
+    const now = Date.now();
+    const cooldownMs = Math.max(1, Number(this.riskCooldownMin || 45)) * 60_000;
+    if ((now - Number(this._lastRiskEntryAt || 0)) < cooldownMs) return { ok: false, reason: "cooldown" };
+    const hourAgo = now - 60 * 60 * 1000;
+    this._riskEntryHistory = this._riskEntryHistory.filter((ts) => Number(ts || 0) >= hourAgo);
+    if (this._riskEntryHistory.length >= Math.max(1, Number(this.maxRiskEntriesPerHour || 1))) {
+      return { ok: false, reason: "hour_limit" };
+    }
+    return { ok: true, reason: "ok" };
   }
 
 
@@ -269,7 +305,7 @@ export class LeadLagPaperStrategy {
 
   _clearPendingSetup(reason = "clear") {
     if (!this._pendingSetup) return;
-    this._logThrottled("paper_setup", { event: "setup_cleared", reason, leader: this._pendingSetup.leader, follower: this._pendingSetup.follower }, `setup_cleared:${reason}`, 5000);
+    this._logThrottled("paper_setup", { event: "setup_cleared", reason, leader: this._pendingSetup.leader, follower: this._pendingSetup.follower, source: this._pendingSetup.followerSource, symbol: this._pendingSetup.follower, presetName: this.currentPresetName || null }, `setup_cleared:${reason}`, 5000);
     this._pendingSetup = null;
   }
 
@@ -363,7 +399,7 @@ export class LeadLagPaperStrategy {
         this._pendingSetup.lastLeaderBarT = pendingLeaderLast.t;
         this._pendingSetup.expiresInBars -= 1;
         if (this._pendingSetup.expiresInBars <= 0) {
-          this.logger?.log("paper_setup", { event: "setup_expired", leader: this._pendingSetup.leader, follower: this._pendingSetup.follower, side: this._pendingSetup.side });
+          this.logger?.log("paper_setup", { event: "setup_expired", leader: this._pendingSetup.leader, follower: this._pendingSetup.follower, side: this._pendingSetup.side, source: this._pendingSetup.followerSource, presetName: this.currentPresetName || null });
           this._countReject("setupExpired", "Setup создан, ждём подтверждение…");
           this._pendingSetup = null;
         }
@@ -410,10 +446,15 @@ export class LeadLagPaperStrategy {
 
     const thr = this.impulseZ * strictFactor * leaderVol;
     const debugImpulseBypass = this.debugAllowEntryWithoutImpulse;
-    if (!this._pendingSetup && !debugImpulseBypass && Math.abs(lastR) < thr) {
+    const impulseZNow = leaderVol > 0 ? Math.abs(lastR) / leaderVol : 0;
+    const impulseZThr = this.impulseZ * strictFactor;
+    const riskImpulseMin = Math.max(0, impulseZThr - Math.max(0, Number(this.riskImpulseMargin || 0)));
+    const riskWindowPass = this._isRiskModeEnabled() && impulseZNow >= riskImpulseMin;
+
+    if (!this._pendingSetup && !debugImpulseBypass && Math.abs(lastR) < thr && !riskWindowPass) {
       this._countReject("impulseFail", "Жду импульс…", thr - Math.abs(lastR), {
-        impulseZNow: leaderVol > 0 ? Math.abs(lastR) / leaderVol : null,
-        impulseZThr: this.impulseZ * strictFactor,
+        impulseZNow,
+        impulseZThr,
       });
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
       return;
@@ -461,6 +502,9 @@ export class LeadLagPaperStrategy {
         leaderSource,
         followerSource,
         leaderThr: thr,
+        impulseZNow,
+        impulseZThr,
+        isRiskCandidate: Math.abs(lastR) < thr,
         leaderVol,
         followerVol,
         tpR1,
@@ -472,7 +516,7 @@ export class LeadLagPaperStrategy {
         lastFollowerBarT: null,
       };
       this.runtimeStatus = "Setup создан, жду подтверждение…";
-      this.logger?.log("paper_setup", { event: "setup_created", leader, follower, side, corr: top.corr, tpR1, tpR2, slR, edgeGateR, ttlBars: this.setupTTLbars });
+      this.logger?.log("paper_setup", { event: "setup_created", leader, follower, side, corr: top.corr, tpR1, tpR2, slR, edgeGateR, ttlBars: this.setupTTLbars, source: followerSource, symbol: follower, presetName: this.currentPresetName || null });
       return;
     }
 
@@ -516,12 +560,32 @@ export class LeadLagPaperStrategy {
     const entryMid = this.feed.getMid(setup.follower);
     if (entryMid == null) return;
 
+    const riskCandidate = !!setup.isRiskCandidate;
+    const riskAllowed = riskCandidate ? this._canOpenRiskEntry() : { ok: false, reason: "not_risk" };
+    if (riskCandidate && !riskAllowed.ok) {
+      this._countReject("impulseFail", "Жду импульс…", Math.max(0, Number(setup.impulseZThr || 0) - Number(setup.impulseZNow || 0)), {
+        impulseZNow: setup.impulseZNow,
+        impulseZThr: setup.impulseZThr,
+      });
+      this._logThrottled("paper_risk_skip", {
+        reason: riskAllowed.reason,
+        leader: setup.leader,
+        follower: setup.follower,
+        riskCooldownMin: this.riskCooldownMin,
+        maxRiskEntriesPerHour: this.maxRiskEntriesPerHour,
+      }, `risk_skip:${riskAllowed.reason}:${setup.leader}:${setup.follower}`, 5000);
+      return;
+    }
+
+    const qtyMultiplier = riskCandidate ? Math.min(1, Math.max(0.05, Number(this.riskQtyMultiplier || 1))) : 1;
+    const qtyUSDT = Math.max(1, Number(this.qtyUSDT || 0) * qtyMultiplier);
+
     try {
       this.broker.open({
         symbol: setup.follower,
         side: setup.side,
         entryMid,
-        qtyUSDT: this.qtyUSDT,
+        qtyUSDT,
         tpR: setup.tpR2,
         tpR1: setup.tpR1,
         tpR2: setup.tpR2,
@@ -540,8 +604,30 @@ export class LeadLagPaperStrategy {
           followerVol: setup.followerVol,
           edgeGateR: setup.edgeGateR,
           presetName: this.currentPresetName || null,
+          isRiskEntry: riskCandidate,
+          riskMode: this.riskMode,
+          riskQtyMultiplier: qtyMultiplier,
         },
       });
+
+      if (riskCandidate) {
+        const now = Date.now();
+        this._lastRiskEntryAt = now;
+        this._riskEntryHistory.push(now);
+        this.logger?.log("paper_risk_entry", {
+          event: "[RISK-ENTRY]",
+          message: `[RISK-ENTRY] margin=${Number(this.riskImpulseMargin || 0).toFixed(2)}, impulseZNow=${Number(setup.impulseZNow || 0).toFixed(2)}, thr=${Number(setup.impulseZThr || 0).toFixed(2)}, qtyMult=${qtyMultiplier.toFixed(2)}`,
+          leader: setup.leader,
+          follower: setup.follower,
+          source: setup.followerSource,
+          mode: "paper",
+          presetName: this.currentPresetName || null,
+          margin: this.riskImpulseMargin,
+          impulseZNow: setup.impulseZNow,
+          impulseZThr: setup.impulseZThr,
+          qtyMultiplier,
+        });
+      }
 
       this.runtimeStatus = "Сделка открыта";
       if (this.debugAllowEntryWithoutImpulse) this._lastDebugEntryAt = Date.now();
@@ -557,6 +643,8 @@ export class LeadLagPaperStrategy {
         tpR1: setup.tpR1,
         tpR2: setup.tpR2,
         slR: setup.slR,
+        isRiskEntry: riskCandidate,
+        qtyUSDT,
       });
       this._broadcastState({ lastSignal: { leader: setup.leader, follower: setup.follower, side: setup.side, corr: setup.corr, tpR1: setup.tpR1, tpR2: setup.tpR2, slR: setup.slR } });
       this._pendingSetup = null;

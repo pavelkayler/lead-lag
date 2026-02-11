@@ -23,6 +23,11 @@ const DEFAULT_PRESET = {
   blacklist: [],
   useFixedLeaders: false,
   autoExcludeNoMatchThreshold: 100,
+  riskMode: "OFF",
+  riskImpulseMargin: 0.4,
+  riskQtyMultiplier: 0.5,
+  riskCooldownMin: 45,
+  maxRiskEntriesPerHour: 1,
   autoTune: {
     enabled: true,
     startTuningAfterMin: 12,
@@ -33,6 +38,9 @@ const DEFAULT_PRESET = {
       impulseZ: { floor: 1.6, ceil: 4 },
       confirmZ: { floor: 0.05, ceil: 1 },
       edgeMult: { floor: 2.5, ceil: 8 },
+      riskImpulseMargin: { floor: 0.1, ceil: 0.8 },
+      riskQtyMultiplier: { floor: 0.2, ceil: 1.0 },
+      riskModeMax: 3,
     },
   },
 };
@@ -92,7 +100,7 @@ export class PaperTestRunner {
     try {
       if (fs.existsSync(this.presetsPath)) {
         const saved = JSON.parse(fs.readFileSync(this.presetsPath, "utf8"));
-        if (Array.isArray(saved) && saved.length) this.presetsCatalog = saved.map((p) => ({ ...p, blacklist: normalizeBlacklist(p), blacklistSymbols: normalizeBlacklist(p).map((x) => x.symbol) }));
+        if (Array.isArray(saved) && saved.length) this.presetsCatalog = saved.map((p) => ({ ...clone(DEFAULT_PRESET), ...p, blacklist: normalizeBlacklist(p), blacklistSymbols: normalizeBlacklist(p).map((x) => x.symbol) }));
       }
     } catch {}
   }
@@ -320,61 +328,122 @@ export class PaperTestRunner {
     if ((now - this.lastSessionTuneAt) < (Number(cfg.tuningIntervalSec || 90) * 1000)) return usePresets;
 
     const summary = this._aggregateSummary();
-    if (Number(summary.trades || 0) > 0 || this.status?.state !== "RUNNING_WAITING") return usePresets;
-
-    const windowStart = now - this.rejectWindowMs;
-    const totals = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
-    for (const row of this.rejectWindow) {
-      if (Number(row.ts || 0) < windowStart) continue;
-      for (const [k, v] of Object.entries(row.counters || {})) totals[k] = Number(totals[k] || 0) + Number(v || 0);
-    }
-    const blocksTotal = Object.values(totals).reduce((a, v) => a + Number(v || 0), 0);
-    if (blocksTotal <= 0) return usePresets;
-
-    const impulseShare = Number(totals.impulseFail || 0) / blocksTotal;
-    const edgeShare = Number(totals.edgeGateFail || 0) / blocksTotal;
-    let blocker = null;
-    if (impulseShare > 0.6) blocker = "impulseFail";
-    else if (edgeShare > 0.4) blocker = "edgeGateFail";
-    if (!blocker) return usePresets;
-
     const targets = this.instances.size ? Array.from(this.instances.values()).map((x) => ({ strategy: x.strategy, preset: x.preset })) : [{ strategy: this.strategy, preset: this.status.currentPreset || usePresets[0] }];
     let changed = false;
 
-    for (const t of targets) {
-      const strategy = t.strategy;
-      const preset = t.preset || {};
-      if (!strategy?.getParams || !strategy?.setParams) continue;
-      const params = strategy.getParams();
-      if (blocker === "impulseFail") {
-        const floor = Number(cfg?.bounds?.impulseZ?.floor ?? 1.6);
-        const step = Number(cfg?.stepImpulseZ ?? 0.2);
-        const from = Number(params.impulseZ || 2.5);
-        const to = Math.max(floor, from - step);
-        if (to >= from) {
-          this.advisor.logEvent("auto-tune", `[AUTO-TUNE] достигнут минимум impulseZ=${from.toFixed(2)}, дальше не смягчаю`);
-          continue;
-        }
-        strategy.setParams({ impulseZ: Number(to.toFixed(4)) });
-        t.preset = { ...preset, impulseZ: Number(to.toFixed(4)) };
-        this.advisor.logEvent("auto-tune", `[AUTO-TUNE] impulseZ ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: impulseFail ${(impulseShare * 100).toFixed(0)}% / 10m)`);
-        changed = true;
+    const riskLevels = ["OFF", "LOW", "MED", "HIGH"];
+    const riskRank = (mode) => Math.max(0, riskLevels.indexOf(String(mode || "OFF").toUpperCase()));
+    const modeByRank = (rank) => riskLevels[Math.max(0, Math.min(riskLevels.length - 1, rank))] || "OFF";
+
+    if (Number(summary.trades || 0) <= 0 && this.status?.state === "RUNNING_WAITING") {
+      const windowStart = now - this.rejectWindowMs;
+      const totals = { corrFail: 0, impulseFail: 0, edgeGateFail: 0, confirmFail: 0, setupExpired: 0, noCandidatePairs: 0 };
+      for (const row of this.rejectWindow) {
+        if (Number(row.ts || 0) < windowStart) continue;
+        for (const [k, v] of Object.entries(row.counters || {})) totals[k] = Number(totals[k] || 0) + Number(v || 0);
       }
-      if (blocker === "edgeGateFail") {
-        const floor = Number(cfg?.bounds?.edgeMult?.floor ?? 2.5);
-        const step = Number(cfg?.stepEdgeMult ?? 0.5);
-        const from = Number(params.edgeMult || 5);
-        const to = Math.max(floor, from - step);
-        if (to >= from) {
-          this.advisor.logEvent("auto-tune", `[AUTO-TUNE] достигнут минимум edgeMult=${from.toFixed(2)}, дальше не смягчаю`);
-          continue;
+      const blocksTotal = Object.values(totals).reduce((a, v) => a + Number(v || 0), 0);
+      if (blocksTotal > 0) {
+        const impulseShare = Number(totals.impulseFail || 0) / blocksTotal;
+        const edgeShare = Number(totals.edgeGateFail || 0) / blocksTotal;
+
+        for (const t of targets) {
+          if (changed) break;
+          const strategy = t.strategy;
+          const preset = t.preset || {};
+          if (!strategy?.getParams || !strategy?.setParams) continue;
+          const params = strategy.getParams();
+
+          if (impulseShare > 0.6) {
+            const floor = Number(cfg?.bounds?.impulseZ?.floor ?? 1.6);
+            const step = Number(cfg?.stepImpulseZ ?? 0.2);
+            const from = Number(params.impulseZ || 2.5);
+            const to = Math.max(floor, from - step);
+            if (to < from) {
+              strategy.setParams({ impulseZ: Number(to.toFixed(4)) });
+              t.preset = { ...preset, impulseZ: Number(to.toFixed(4)) };
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE] impulseZ ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: trades=0, impulseFail ${(impulseShare * 100).toFixed(0)}%)`);
+              changed = true;
+              break;
+            }
+
+            const marginStep = Number(cfg?.stepRiskImpulseMargin ?? 0.1);
+            const marginCeil = Number(cfg?.bounds?.riskImpulseMargin?.ceil ?? 0.8);
+            const marginFrom = Number(params.riskImpulseMargin ?? preset.riskImpulseMargin ?? 0.4);
+            const marginTo = Math.min(marginCeil, marginFrom + marginStep);
+            if (marginTo > marginFrom) {
+              strategy.setParams({ riskImpulseMargin: Number(marginTo.toFixed(4)) });
+              t.preset = { ...preset, riskImpulseMargin: Number(marginTo.toFixed(4)) };
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE] riskImpulseMargin ${marginFrom.toFixed(2)} -> ${marginTo.toFixed(2)} (reason: trades=0, impulseFail ${(impulseShare * 100).toFixed(0)}%, impulseZ at floor)`);
+              changed = true;
+              break;
+            }
+
+            const maxRank = Math.max(0, Math.min(3, Number(cfg?.bounds?.riskModeMax ?? 3)));
+            const modeFrom = String(params.riskMode || preset.riskMode || "OFF").toUpperCase();
+            const fromRank = riskRank(modeFrom);
+            const modeTo = modeByRank(Math.min(maxRank, fromRank + 1));
+            if (riskRank(modeTo) > fromRank) {
+              strategy.setParams({ riskMode: modeTo });
+              t.preset = { ...preset, riskMode: modeTo };
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE] riskMode ${modeFrom} -> ${modeTo} (reason: trades=0, reached floors)`);
+              changed = true;
+              break;
+            }
+          }
+
+          if (!changed && edgeShare > 0.4) {
+            const floor = Number(cfg?.bounds?.edgeMult?.floor ?? 2.5);
+            const step = Number(cfg?.stepEdgeMult ?? 0.5);
+            const from = Number(params.edgeMult || 5);
+            const to = Math.max(floor, from - step);
+            if (to < from) {
+              strategy.setParams({ edgeMult: Number(to.toFixed(4)) });
+              t.preset = { ...preset, edgeMult: Number(to.toFixed(4)) };
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE] edgeMult ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: trades=0, edgeGateFail ${(edgeShare * 100).toFixed(0)}%)`);
+              changed = true;
+              break;
+            }
+          }
         }
-        strategy.setParams({ edgeMult: Number(to.toFixed(4)) });
-        t.preset = { ...preset, edgeMult: Number(to.toFixed(4)) };
-        this.advisor.logEvent("auto-tune", `[AUTO-TUNE] edgeMult ${from.toFixed(2)} -> ${to.toFixed(2)} (reason: edgeGateFail ${(edgeShare * 100).toFixed(0)}% / 10m)`);
-        changed = true;
       }
-      if (changed) break;
+    } else if (Number(summary.trades || 0) > 0) {
+      const recent = this._allTrades().slice(0, 5);
+      const streak = recent.slice(0, 3);
+      const losingStreak = streak.length >= 3 && streak.every((t) => Number(t?.pnlUSDT || 0) < 0);
+      const recentNet = recent.reduce((acc, t) => acc + Number(t?.pnlUSDT || 0), 0);
+      if (losingStreak || recentNet < 0) {
+        for (const t of targets) {
+          if (changed) break;
+          const strategy = t.strategy;
+          const preset = t.preset || {};
+          if (!strategy?.getParams || !strategy?.setParams) continue;
+          const params = strategy.getParams();
+
+          const marginFloor = Number(cfg?.bounds?.riskImpulseMargin?.floor ?? 0.1);
+          const marginStep = Number(cfg?.stepRiskImpulseMargin ?? 0.1);
+          const marginFrom = Number(params.riskImpulseMargin ?? preset.riskImpulseMargin ?? 0.4);
+          const marginTo = Math.max(marginFloor, marginFrom - marginStep);
+          if (marginTo < marginFrom) {
+            strategy.setParams({ riskImpulseMargin: Number(marginTo.toFixed(4)) });
+            t.preset = { ...preset, riskImpulseMargin: Number(marginTo.toFixed(4)) };
+            this.advisor.logEvent("auto-tune", `[AUTO-TUNE] riskImpulseMargin ${marginFrom.toFixed(2)} -> ${marginTo.toFixed(2)} (reason: negative pnl series)`);
+            changed = true;
+            break;
+          }
+
+          const modeFrom = String(params.riskMode || preset.riskMode || "OFF").toUpperCase();
+          const fromRank = riskRank(modeFrom);
+          const modeTo = modeByRank(fromRank - 1);
+          if (riskRank(modeTo) < fromRank) {
+            strategy.setParams({ riskMode: modeTo });
+            t.preset = { ...preset, riskMode: modeTo };
+            this.advisor.logEvent("auto-tune", `[AUTO-TUNE] riskMode ${modeFrom} -> ${modeTo} (reason: negative pnl series)`);
+            changed = true;
+            break;
+          }
+        }
+      }
     }
 
     this.lastSessionTuneAt = now;
@@ -521,6 +590,7 @@ export class PaperTestRunner {
       targetMinTradesPerHour: Number(presetTune?.targetMinTradesPerHour || 1),
       stepImpulseZ: Number(presetTune?.stepImpulseZ || 0.2),
       stepEdgeMult: Number(presetTune?.stepEdgeMult || 0.5),
+      stepRiskImpulseMargin: Number(presetTune?.stepRiskImpulseMargin || 0.1),
       bounds: presetTune?.bounds || {},
     };
 

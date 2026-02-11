@@ -228,6 +228,37 @@ function sendEvent(ws, topic, payload) {
 function makeOk(id, payload) { return { type: "response", id, ok: true, payload }; }
 function makeErr(id, error) { return { type: "response", id, ok: false, error: String(error) }; }
 
+function makeLeadLagLogger(primaryLogger, leadlagFileLogger) {
+  const inferSymbol = (payload = {}) => payload.symbol || payload.follower || payload.leader || null;
+  const inferSource = (payload = {}) => payload.source || payload.followerSource || payload.leaderSource || null;
+
+  const enrichPayload = (type, payload = {}) => {
+    const out = { ...payload, bot: "leadlag" };
+    if ((String(type || "").startsWith("paper_") || payload?.mode === "paper") && !out.mode) out.mode = "paper";
+    const symbol = inferSymbol(payload);
+    const source = inferSource(payload);
+    if (symbol && !out.symbol) out.symbol = symbol;
+    if (source && !out.source) out.source = source;
+    if (payload?.currentPresetName && !out.presetName) out.presetName = payload.currentPresetName;
+    return out;
+  };
+
+  return {
+    log(type, payload = {}) {
+      primaryLogger?.log?.(type, payload);
+      leadlagFileLogger?.log?.(type, enrichPayload(type, payload));
+    },
+    rotate() {
+      primaryLogger?.rotate?.();
+      leadlagFileLogger?.rotate?.();
+    },
+    close() {
+      primaryLogger?.close?.();
+      leadlagFileLogger?.close?.();
+    },
+  };
+}
+
 function toHtmlTable(title, rows) {
   const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   if (!rows?.length) return `<h3>${esc(title)}</h3><p>Нет данных</p>`;
@@ -1075,6 +1106,8 @@ async deletePreset(payload = {}) {
 function setupWebSocketServer(server) {
   const wss = new WebSocketServer({ server });
   const logger = new JsonlLogger();
+  const leadlagFileLogger = new JsonlLogger({ dir: "logs/leadlag" });
+  const leadlagLogger = makeLeadLagLogger(logger, leadlagFileLogger);
   const rest = new BybitRestClient({ baseUrl: BYBIT_CFG.httpBaseUrl, logger });
 const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
 
@@ -1089,7 +1122,7 @@ const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
   feed.setSymbols(DEFAULT_SYMBOLS);
   HTTP_CTX.feed = feed;
 
-  const leadLag = new LeadLagService({ feed, hub, logger, intervalMs: 2000, windowBars: 240, maxLagBars: 20, minBars: 120 });
+  const leadLag = new LeadLagService({ feed, hub, logger: leadlagLogger, intervalMs: 2000, windowBars: 240, maxLagBars: 20, minBars: 120 });
   leadLag.start();
 
   const priv = new PrivateWsClient({
@@ -1115,11 +1148,11 @@ const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
   const trade = new TradeTransport({ rest, tradeState, hub, logger });
 const risk = new RiskManager({ allowSymbols: DEFAULT_SYMBOLS, logger });
 
-  const paper = new PaperBroker({ startingBalanceUSDT: 1000, feeBps: 6, logger });
-  const strat = new LeadLagPaperStrategy({ feed, leadLag, broker: paper, hub, logger });  
+  const paper = new PaperBroker({ startingBalanceUSDT: 1000, feeBps: 6, logger: leadlagLogger });
+  const strat = new LeadLagPaperStrategy({ feed, leadLag, broker: paper, hub, logger: leadlagLogger });
 
 const universe = new SymbolUniverse({ bybitRest: rest, logger });
-const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger, leadLag, rest });
+const paperTest = new PaperTestRunner({ feed, strategy: strat, broker: paper, hub, universe, logger: leadlagLogger, leadLag, rest });
   const instruments = { normalizeQty };
   const liveTrader = new LeadLagLiveTrader({ feed, leadLag, rest, risk, instruments, logger });
   const rangeRunner = new RangeMetricsRunner({ feed, rest, hub, logger, risk });
@@ -1243,7 +1276,7 @@ _tradeStatePollTimer.unref?.();
     try { priv.stop(); } catch {}
     try { trade.stop(); } catch {}
     try { strat.stop(); } catch {}
-    try { logger.close(); } catch {}
+    try { leadlagLogger.close(); } catch {}
     try { server.close(() => process.exit(0)); } catch { process.exit(0); }
   }
   process.on("SIGINT", shutdown);

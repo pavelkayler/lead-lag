@@ -1,0 +1,41 @@
+{
+  "running": true,
+  "runId": "paper-1770721112567",
+  "startedAt": 1770721112567,
+  "endsAt": null,
+  "summary": {
+    "runId": "paper-summary-1770721112",
+    "startedAt": 1770721112851,
+    "endsAt": 1770721112851,
+    "durationSec": 0,
+    "startingBalanceUSDT": 1000,
+    "equityUSDT": 1000,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "winRate": 0,
+    "grossPnlUSDT": 0,
+    "feesUSDT": 0,
+    "slippageUSDT": 0,
+    "netPnlUSDT": 0,
+    "netPnlBps": 0,
+    "profitFactor": 0,
+    "maxDrawdownUSDT": 0,
+    "avgHoldSec": 0,
+    "avgR": 0,
+    "stats": {
+      "wins": 0,
+      "losses": 0,
+      "trades": 0,
+      "pnlUSDT": 0,
+      "feesUSDT": 0,
+      "slippageUSDT": 0,
+      "grossPnlUSDT": 0
+    },
+    "notes": "OK",
+    "tradesPreview": []
+  },
+  "presetsByHour": [],
+  "topPairs": [],
+  "note": "Running"
+}

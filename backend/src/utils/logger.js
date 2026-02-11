@@ -62,7 +62,7 @@ export class DailyJsonlLogger {
   _dayStamp(ts = Date.now()) {
     const d = new Date(ts);
     const pad = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
   }
 
   _ensureStream(ts = Date.now()) {
@@ -85,5 +85,19 @@ export class DailyJsonlLogger {
   close() {
     try { this._stream?.end(); } catch {}
     this._stream = null;
+  }
+}
+
+export function readLastJsonlLines(filePath, maxLines = 200) {
+  const linesLimit = Math.max(1, Math.min(2000, Number(maxLines) || 200));
+  if (!filePath || !fs.existsSync(filePath)) return [];
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const lines = raw.split(/\r?\n/).filter(Boolean).slice(-linesLimit);
+    return lines.map((line) => {
+      try { return JSON.parse(line); } catch { return { raw: line }; }
+    });
+  } catch {
+    return [];
   }
 }

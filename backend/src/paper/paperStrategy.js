@@ -29,7 +29,7 @@ export class LeadLagPaperStrategy {
     this.fixedLeaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     this.useFixedLeaders = false;
     this.allowedSources = new Set(["BT", "BNB"]);
-    this.interExchangeArbEnabled = true;
+    this.interExchangeArbitrage = true;
     this.blacklistSymbols = new Set();
     this.blacklistBySource = new Map();
     this.noMatchAsLeaderCount = new Map();
@@ -48,7 +48,12 @@ export class LeadLagPaperStrategy {
     this._riskEntryHistory = [];
     this._lastDebugEntryAt = 0;
     this.baseLeaders = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
+    this.protectCoreLeaders = true;
+    this.coreLeaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     this.onAutoExclude = null;
+    this.riskModeEnabled = false;
+    this.riskLevel = 0;
+    this._gatePassStamps = { impulse: [], corr: [], confirm: [], edge: [] };
 
     this._timer = null;
     this._lastLeaderBarT = null;
@@ -88,18 +93,25 @@ export class LeadLagPaperStrategy {
     if (Array.isArray(p.fixedLeaders)) { this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase()); this.useFixedLeaders = true; }
     if (p.useFixedLeaders != null) this.useFixedLeaders = !!p.useFixedLeaders;
     if (Array.isArray(p.allowedSources)) this.allowedSources = new Set(p.allowedSources.map((x) => String(x).toUpperCase()));
-    if (p.interExchangeArbEnabled != null) this.interExchangeArbEnabled = !!p.interExchangeArbEnabled;
+    if (p.interExchangeArbEnabled != null) this.interExchangeArbitrage = !!p.interExchangeArbEnabled;
+    if (p.interExchangeArbitrage != null) this.interExchangeArbitrage = !!p.interExchangeArbitrage;
     if (p.autoExcludeNoMatchThreshold != null) this.autoExcludeNoMatchThreshold = Math.max(10, Math.round(n(p.autoExcludeNoMatchThreshold, this.autoExcludeNoMatchThreshold)));
     if (p.debugAllowEntryWithoutImpulse != null) this.debugAllowEntryWithoutImpulse = !!p.debugAllowEntryWithoutImpulse;
     if (p.debugEntryCooldownMin != null) this.debugEntryCooldownMin = Math.max(1, Math.round(n(p.debugEntryCooldownMin, this.debugEntryCooldownMin)));
     if (p.riskMode != null) {
       const mode = String(p.riskMode || "OFF").toUpperCase();
       this.riskMode = ["OFF", "LOW", "MED", "HIGH"].includes(mode) ? mode : "OFF";
+      this.riskModeEnabled = this.riskMode !== "OFF";
+      this.riskLevel = { OFF: 0, LOW: 1, MED: 2, HIGH: 3 }[this.riskMode] || 0;
     }
+    if (p.riskModeEnabled != null) this.riskModeEnabled = !!p.riskModeEnabled;
+    if (p.riskLevel != null) this.riskLevel = Math.max(0, Math.min(3, Math.round(n(p.riskLevel, this.riskLevel))));
     if (p.riskImpulseMargin != null) this.riskImpulseMargin = Math.max(0, n(p.riskImpulseMargin, this.riskImpulseMargin));
     if (p.riskQtyMultiplier != null) this.riskQtyMultiplier = Math.min(1, Math.max(0.05, n(p.riskQtyMultiplier, this.riskQtyMultiplier)));
     if (p.riskCooldownMin != null) this.riskCooldownMin = Math.max(1, Math.round(n(p.riskCooldownMin, this.riskCooldownMin)));
     if (p.maxRiskEntriesPerHour != null) this.maxRiskEntriesPerHour = Math.max(1, Math.round(n(p.maxRiskEntriesPerHour, this.maxRiskEntriesPerHour)));
+    if (p.protectCoreLeaders != null) this.protectCoreLeaders = !!p.protectCoreLeaders;
+    if (Array.isArray(p.coreLeaders)) this.coreLeaders = p.coreLeaders.map((x) => String(x).toUpperCase()).filter(Boolean);
     if (Array.isArray(p.blacklistSymbols)) this.blacklistSymbols = new Set(p.blacklistSymbols.map((x) => String(x).toUpperCase()));
     if (Array.isArray(p.blacklist)) {
       this.blacklistSymbols = new Set();
@@ -140,7 +152,8 @@ export class LeadLagPaperStrategy {
       fixedLeaders: this.fixedLeaders,
       useFixedLeaders: this.useFixedLeaders,
       allowedSources: Array.from(this.allowedSources),
-      interExchangeArbEnabled: this.interExchangeArbEnabled,
+      interExchangeArbitrage: this.interExchangeArbitrage,
+      interExchangeArbEnabled: this.interExchangeArbitrage,
       blacklistSymbols: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])),
       blacklist: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
       autoExcludeNoMatchThreshold: this.autoExcludeNoMatchThreshold,
@@ -151,11 +164,35 @@ export class LeadLagPaperStrategy {
       riskQtyMultiplier: this.riskQtyMultiplier,
       riskCooldownMin: this.riskCooldownMin,
       maxRiskEntriesPerHour: this.maxRiskEntriesPerHour,
+      riskModeEnabled: this.riskModeEnabled,
+      riskLevel: this.riskLevel,
+      protectCoreLeaders: this.protectCoreLeaders,
+      coreLeaders: this.coreLeaders,
+      gatePassCountHour: this._gatePassCounts(),
     };
   }
 
   _isRiskModeEnabled() {
-    return this.riskMode !== "OFF";
+    return this.riskModeEnabled || this.riskMode !== "OFF" || this.riskLevel > 0;
+  }
+
+  _gatePassCounts() {
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const k of Object.keys(this._gatePassStamps)) {
+      this._gatePassStamps[k] = (this._gatePassStamps[k] || []).filter((ts) => Number(ts) >= cutoff);
+    }
+    return {
+      impulsePassCount: this._gatePassStamps.impulse.length,
+      corrPassCount: this._gatePassStamps.corr.length,
+      confirmPassCount: this._gatePassStamps.confirm.length,
+      edgePassCount: this._gatePassStamps.edge.length,
+    };
+  }
+
+  _markGatePass(name) {
+    if (!this._gatePassStamps[name]) return;
+    this._gatePassStamps[name].push(Date.now());
+    this._gatePassCounts();
   }
 
   _canOpenRiskEntry() {
@@ -233,42 +270,34 @@ export class LeadLagPaperStrategy {
 
     for (const key of keys) {
       const [symbol, source] = key.split("|");
-      if (this.baseLeaders.has(symbol)) continue;
+      if (this.protectCoreLeaders && this.coreLeaders.includes(symbol)) continue;
       if (this.autoExcludedSeries.has(key)) continue;
-      let minNoMatch = Infinity;
-      let worstKey = null;
-      let worstCount = -1;
+      let leaderMin = Infinity;
+      let followerMin = Infinity;
+      let testedAsLeader = true;
+      let testedAsFollower = true;
       for (const other of keys) {
         if (other === key) continue;
-        const pk = this._pairKey(key, other);
-        if (!checkedPairs.has(pk)) {
-          minNoMatch = 0;
-          continue;
-        }
-        const cnt = Number(this.noMatchPairCount.get(pk) || 0);
-        if (cnt < minNoMatch) {
-          minNoMatch = cnt;
-        }
-        if (cnt > worstCount) {
-          worstCount = cnt;
-          worstKey = other;
-        }
+        const asLeader = this._pairKey(key, other);
+        const asFollower = this._pairKey(other, key);
+        if (!checkedPairs.has(asLeader)) testedAsLeader = false;
+        if (!checkedPairs.has(asFollower)) testedAsFollower = false;
+        leaderMin = Math.min(leaderMin, Number(this.noMatchPairCount.get(asLeader) || 0));
+        followerMin = Math.min(followerMin, Number(this.noMatchPairCount.get(asFollower) || 0));
       }
-      if (!Number.isFinite(minNoMatch)) continue;
-      this.noMatchAsLeaderCount.set(key, minNoMatch);
-      this.noMatchAsFollowerCount.set(key, minNoMatch);
-      if (minNoMatch >= this.autoExcludeNoMatchThreshold) {
+      if (!Number.isFinite(leaderMin) || !Number.isFinite(followerMin)) continue;
+      this.noMatchAsLeaderCount.set(key, leaderMin);
+      this.noMatchAsFollowerCount.set(key, followerMin);
+      if (testedAsLeader && testedAsFollower && leaderMin >= this.autoExcludeNoMatchThreshold && followerMin >= this.autoExcludeNoMatchThreshold) {
         this.autoExcludedSeries.add(key);
         this.onAutoExclude?.({
           symbol,
           source,
           reason: "no_match_pairwise",
-          minNoMatch,
-          worstCounterpart: worstKey,
-          worstCount,
-          noMatchAsLeaderCount: minNoMatch,
-          noMatchAsFollowerCount: minNoMatch,
+          noMatchAsLeaderCount: leaderMin,
+          noMatchAsFollowerCount: followerMin,
           threshold: this.autoExcludeNoMatchThreshold,
+          universeSize: keys.length,
           presetName: this.currentPresetName || null,
         });
       }
@@ -381,7 +410,7 @@ export class LeadLagPaperStrategy {
     const pairs = (this.leadLag.latest?.pairs || []).slice(0, 20);
     this._updateNoMatchCounters(pairs);
 
-    if (this.interExchangeArbEnabled && (!this.allowedSources.has("BT") || !this.allowedSources.has("BNB"))) {
+    if (this.interExchangeArbitrage && (!this.allowedSources.has("BT") || !this.allowedSources.has("BNB"))) {
       this._countReject("noCandidatePairs", "interExchangeArbEnabled: нужны обе биржи (BT+BNB), пары не сформированы");
       this._logThrottled("paper_status", { event: "inter_exchange_requires_both", allowedSources: Array.from(this.allowedSources), presetName: this.currentPresetName || null }, "inter_exchange_requires_both", 8000);
       return;
@@ -394,7 +423,7 @@ export class LeadLagPaperStrategy {
       const followerSource = String(p.followerSource || "BT").toUpperCase();
       if (!this.allowedSources.has(leaderSource) || !this.allowedSources.has(followerSource)) return false;
       if (this.useFixedLeaders && !this.fixedLeaders.includes(String(leaderBase || "").toUpperCase())) return false;
-      if (this.interExchangeArbEnabled) {
+      if (this.interExchangeArbitrage) {
         if (!leaderBase || !followerBase || leaderBase !== followerBase) return false;
         if (leaderSource === followerSource) return false;
       }
@@ -432,7 +461,7 @@ export class LeadLagPaperStrategy {
     const leader = this._symbolBase(top.leaderBase || top.leader);
     const follower = this._symbolBase(top.followerBase || top.follower);
     const followerSourceRaw = String(top.followerSource || "BT").toUpperCase();
-    const followerSource = this.interExchangeArbEnabled ? "BT" : followerSourceRaw;
+    const followerSource = this.interExchangeArbitrage ? "BT" : followerSourceRaw;
 
     const strictFactor = this._strictFactor();
     const effMinCorr = this.minCorr * strictFactor;
@@ -441,6 +470,8 @@ export class LeadLagPaperStrategy {
       this._logThrottled("paper_skip", { reason: "corr_below_min", corr: top.corr, minCorr: effMinCorr, baseMinCorr: this.minCorr, entryStrictness: this.entryStrictness }, "skip:corr");
       return;
     }
+
+    this._markGatePass("corr");
 
     const leaderSource = String(top?.leaderSource || "BT").toUpperCase();
     const leaderBars = this.feed.getBars(leader, 2, leaderSource);
@@ -463,7 +494,8 @@ export class LeadLagPaperStrategy {
     const debugImpulseBypass = this.debugAllowEntryWithoutImpulse;
     const impulseZNow = leaderVol > 0 ? Math.abs(lastR) / leaderVol : 0;
     const impulseZThr = this.impulseZ * strictFactor;
-    const riskImpulseMin = Math.max(0, impulseZThr - Math.max(0, Number(this.riskImpulseMargin || 0)));
+    const riskLevel = Math.max(0, Math.min(3, Number(this.riskLevel || 0)));
+    const riskImpulseMin = Math.max(0, impulseZThr - (Math.max(0, Number(this.riskImpulseMargin || 0)) * riskLevel));
     const riskWindowPass = this._isRiskModeEnabled() && impulseZNow >= riskImpulseMin;
 
     if (!this._pendingSetup && !debugImpulseBypass && Math.abs(lastR) < thr && !riskWindowPass) {
@@ -474,6 +506,8 @@ export class LeadLagPaperStrategy {
       this._logThrottled("paper_skip", { reason: "no_impulse", leader, leaderR: lastR, impulseThr: thr }, `skip:no_impulse:${leader}`);
       return;
     }
+
+    if (!this._pendingSetup && (debugImpulseBypass || riskWindowPass || Math.abs(lastR) >= thr)) this._markGatePass("impulse");
 
     if (!this._pendingSetup && debugImpulseBypass) {
       const cooldownMs = Math.max(1, Number(this.debugEntryCooldownMin || 45)) * 60_000;
@@ -495,7 +529,8 @@ export class LeadLagPaperStrategy {
       const slR = this.slSigma * followerVol;
       const brokerState = this.broker.getState();
       const costsR = (2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0))) / 10_000;
-      const edgeGateR = costsR * this.edgeMult * strictFactor;
+      const effectiveEdgeMult = Math.max(1, this.edgeMult - (0.5 * Math.max(0, Math.min(3, Number(this.riskLevel || 0)))));
+      const edgeGateR = costsR * effectiveEdgeMult * strictFactor;
       if (tpR2 < edgeGateR) {
         this._countReject("edgeGateFail", "Edge gate блокирует вход…", edgeGateR - tpR2, {
           edgeNow: tpR2,
@@ -505,6 +540,7 @@ export class LeadLagPaperStrategy {
         return;
       }
 
+      this._markGatePass("edge");
       this._pendingSetup = {
         createdAt: Date.now(),
         leader,
@@ -542,7 +578,8 @@ export class LeadLagPaperStrategy {
     setup.lastFollowerBarT = followerLastBar.t;
 
     const followerLastR = Number(followerLastBar.r);
-    const followerConfirmAbsMin = this.minFollowerConfirmZ * strictFactor * setup.followerVol;
+    const effectiveConfirmZ = Math.max(0, this.minFollowerConfirmZ - (0.05 * riskLevel));
+    const followerConfirmAbsMin = effectiveConfirmZ * strictFactor * setup.followerVol;
     const followerConfirmed = Number.isFinite(followerLastR)
       && this._isSideAligned(setup.side, followerLastR)
       && Math.abs(followerLastR) >= followerConfirmAbsMin;
@@ -572,6 +609,7 @@ export class LeadLagPaperStrategy {
       return;
     }
 
+    this._markGatePass("confirm");
     const entryMid = this.feed.getMid(setup.follower);
     if (entryMid == null) return;
 
@@ -592,7 +630,7 @@ export class LeadLagPaperStrategy {
       return;
     }
 
-    const qtyMultiplier = riskCandidate ? Math.min(1, Math.max(0.05, Number(this.riskQtyMultiplier || 1))) : 1;
+    const qtyMultiplier = riskCandidate ? Math.min(1.5, Math.max(0.05, Number(this.riskQtyMultiplier || 1))) : 1;
     const qtyUSDT = Math.max(1, Number(this.qtyUSDT || 0) * qtyMultiplier);
 
     try {

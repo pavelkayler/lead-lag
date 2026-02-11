@@ -117,7 +117,7 @@ import http from "http";
 import crypto from "crypto";
 import { WebSocketServer } from "ws";
 
-import { DailyJsonlLogger, JsonlLogger } from "./src/utils/logger.js";
+import { DailyJsonlLogger, JsonlLogger, readLastJsonlLines } from "./src/utils/logger.js";
 import { WsHub } from "./src/utils/wsHub.js";
 import { FeedManager } from "./src/feed/feedManager.js";
 import { LeadLagService } from "./src/leadlag/leadLagService.js";
@@ -1105,15 +1105,27 @@ async deletePreset(payload = {}) {
       return { ok: true, params: strat.getParams(), state: paper.getState() };
     },
     async paperState() { return { params: strat.getParams(), state: paper.getState() }; },
+    async getBotLogs(payload = {}) {
+      const bot = String(payload?.bot || "leadlag").toLowerCase();
+      const lines = Math.max(1, Math.min(500, Number(payload?.lines || 200)));
+      const day = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      const stamp = `${day.getFullYear()}${pad(day.getMonth() + 1)}${pad(day.getDate())}`;
+      const baseDir = bot === "flipbot" ? path.join(process.cwd(), "logs", "flipbot") : path.join(process.cwd(), "logs", "leadlag");
+      const prefix = bot === "flipbot" ? "flipbot" : "leadlag";
+      const fp = path.join(baseDir, `${prefix}-${stamp}.jsonl`);
+      return { bot: prefix, file: fp, lines: readLastJsonlLines(fp, lines) };
+    },
+
   };
 }
 
 function setupWebSocketServer(server) {
   const wss = new WebSocketServer({ server });
   const logger = new JsonlLogger();
-  const leadlagFileLogger = new JsonlLogger({ dir: "logs/leadlag" });
+  const leadlagFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "logs", "leadlag"), prefix: "leadlag" });
   const leadlagLogger = makeLeadLagLogger(logger, leadlagFileLogger);
-const flipFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "logs", "flip"), prefix: "flip" });
+  const flipFileLogger = new DailyJsonlLogger({ dir: path.join(process.cwd(), "logs", "flipbot"), prefix: "flipbot" });
   const rest = new BybitRestClient({ baseUrl: BYBIT_CFG.httpBaseUrl, logger });
 const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
 

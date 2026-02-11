@@ -1,5 +1,12 @@
 import { PaperBroker } from "./paperBroker.js";
 
+function secondsToBars(seconds, barMs = 1000, { min = 1 } = {}) {
+  const sec = Number(seconds);
+  const ms = Math.max(1, Number(barMs) || 1000);
+  if (!Number.isFinite(sec) || sec <= 0) return min;
+  return Math.max(min, Math.round((sec * 1000) / ms));
+}
+
 export class LeadLagPaperStrategy {
   constructor({ feed, leadLag, broker, hub, logger = null } = {}) {
     this.feed = feed;
@@ -16,11 +23,17 @@ export class LeadLagPaperStrategy {
     this.impulseZ = 2.5;
     this.tpSigma = 1.5;
     this.slSigma = 1.0;
-    this.maxHoldBars = 20;
-    this.cooldownBars = 20;
-    this.edgeMult = 5;
+    this.maxHoldSec = 30;
+    this.cooldownSec = 30;
+    this.maxHoldBars = secondsToBars(this.maxHoldSec, this.feed?.barMs, { min: 1 });
+    this.cooldownBars = secondsToBars(this.cooldownSec, this.feed?.barMs, { min: 0 });
+    this.minEdgeBps = 4;
+    this.edgeSoftener = 1;
     this.minFollowerConfirmZ = 0.25;
-    this.setupTTLbars = 3;
+    this.setupTTLSec = 3;
+    this.setupTTLbars = secondsToBars(this.setupTTLSec, this.feed?.barMs, { min: 1 });
+    this.tpBpsMin = 8;
+    this.slBpsMin = 12;
     this.tp1Frac = 0.6;
     this.enableTrendFilter = true;
     this.trendBars = 5;
@@ -58,6 +71,7 @@ export class LeadLagPaperStrategy {
     this._execRejectStamps = [];
     this._execRejectByReason = {};
     this.lastDecisionRecord = null;
+    this.onDecisionRecord = null;
 
     this._timer = null;
     this._lastLeaderBarT = null;
@@ -79,15 +93,25 @@ export class LeadLagPaperStrategy {
     if (p.qtyUSDT != null) this.qtyUSDT = Math.max(1, n(p.qtyUSDT, this.qtyUSDT));
     if (p.minCorr != null) this.minCorr = Math.max(0, n(p.minCorr, this.minCorr));
     if (p.stdBars != null) this.stdBars = Math.max(30, n(p.stdBars, this.stdBars));
+    if (p.stdSec != null) this.stdBars = secondsToBars(n(p.stdSec, 120), this.feed?.barMs, { min: 30 });
     if (p.impulseZ != null) this.impulseZ = Math.max(0.5, n(p.impulseZ, this.impulseZ));
     if (p.tpSigma != null) this.tpSigma = Math.max(0.1, n(p.tpSigma, this.tpSigma));
     if (p.slSigma != null) this.slSigma = Math.max(0.1, n(p.slSigma, this.slSigma));
-    if (p.maxHoldBars != null) this.maxHoldBars = Math.max(1, n(p.maxHoldBars, this.maxHoldBars));
-    if (p.cooldownBars != null) this.cooldownBars = Math.max(0, n(p.cooldownBars, this.cooldownBars));
-    if (p.edgeMult != null) this.edgeMult = Math.max(1, n(p.edgeMult, this.edgeMult));
+    if (p.maxHoldSec != null) this.maxHoldSec = Math.max(1, n(p.maxHoldSec, this.maxHoldSec));
+    if (p.maxHoldBars != null) this.maxHoldSec = Math.max(1, n(p.maxHoldBars, this.maxHoldBars)) * (Math.max(1, Number(this.feed?.barMs || 1000)) / 1000);
+    if (p.cooldownSec != null) this.cooldownSec = Math.max(0, n(p.cooldownSec, this.cooldownSec));
+    if (p.cooldownBars != null) this.cooldownSec = Math.max(0, n(p.cooldownBars, this.cooldownBars)) * (Math.max(1, Number(this.feed?.barMs || 1000)) / 1000);
+    this.maxHoldBars = secondsToBars(this.maxHoldSec, this.feed?.barMs, { min: 1 });
+    this.cooldownBars = secondsToBars(this.cooldownSec, this.feed?.barMs, { min: 0 });
+    if (p.minEdgeBps != null) this.minEdgeBps = Math.max(0, n(p.minEdgeBps, this.minEdgeBps));
+    if (p.edgeSoftener != null) this.edgeSoftener = Math.max(0.8, Math.min(1.2, n(p.edgeSoftener, this.edgeSoftener)));
     if (p.minFollowerConfirmZ != null) this.minFollowerConfirmZ = Math.max(0, n(p.minFollowerConfirmZ, this.minFollowerConfirmZ));
-    if (p.setupTTLbars != null) this.setupTTLbars = Math.max(1, Math.round(n(p.setupTTLbars, this.setupTTLbars)));
+    if (p.setupTTLSec != null) this.setupTTLSec = Math.max(1, n(p.setupTTLSec, this.setupTTLSec));
+    if (p.setupTTLbars != null) this.setupTTLSec = Math.max(1, n(p.setupTTLbars, this.setupTTLbars)) * (Math.max(1, Number(this.feed?.barMs || 1000)) / 1000);
+    this.setupTTLbars = secondsToBars(this.setupTTLSec, this.feed?.barMs, { min: 1 });
     if (p.tp1Frac != null) this.tp1Frac = Math.min(0.95, Math.max(0.05, n(p.tp1Frac, this.tp1Frac)));
+    if (p.tpBpsMin != null) this.tpBpsMin = Math.max(1, n(p.tpBpsMin, this.tpBpsMin));
+    if (p.slBpsMin != null) this.slBpsMin = Math.max(1, n(p.slBpsMin, this.slBpsMin));
     if (p.enableTrendFilter != null) this.enableTrendFilter = !!p.enableTrendFilter;
     if (p.trendBars != null) this.trendBars = Math.max(2, Math.round(n(p.trendBars, this.trendBars)));
     if (p.trendMinZ != null) this.trendMinZ = Math.max(0, n(p.trendMinZ, this.trendMinZ));
@@ -138,16 +162,23 @@ export class LeadLagPaperStrategy {
       qtyUSDT: this.qtyUSDT,
       minCorr: this.minCorr,
       stdBars: this.stdBars,
+      stdSec: Number(((this.stdBars * (this.feed?.barMs || 1000)) / 1000).toFixed(3)),
       impulseZ: this.impulseZ,
       tpSigma: this.tpSigma,
       slSigma: this.slSigma,
       maxHoldBars: this.maxHoldBars,
+      maxHoldSec: this.maxHoldSec,
       cooldownBars: this.cooldownBars,
+      cooldownSec: this.cooldownSec,
       cooldownLeft: this._cooldownLeft,
-      edgeMult: this.edgeMult,
+      minEdgeBps: this.minEdgeBps,
+      edgeSoftener: this.edgeSoftener,
       minFollowerConfirmZ: this.minFollowerConfirmZ,
       setupTTLbars: this.setupTTLbars,
+      setupTTLSec: this.setupTTLSec,
       tp1Frac: this.tp1Frac,
+      tpBpsMin: this.tpBpsMin,
+      slBpsMin: this.slBpsMin,
       enableTrendFilter: this.enableTrendFilter,
       trendBars: this.trendBars,
       trendMinZ: this.trendMinZ,
@@ -223,11 +254,14 @@ export class LeadLagPaperStrategy {
   _gateMetric(value, thr, pass, details = null) {
     const v = Number(value || 0);
     const t = Number(thr || 0);
-    return { value: v, thr: Number.isFinite(thr) ? t : null, pass: !!pass, margin: Number((v - t).toFixed(6)), details: details || undefined };
+    return { value: v, thr: Number.isFinite(thr) ? t : null, threshold: Number.isFinite(thr) ? t : null, pass: !!pass, margin: Number((v - t).toFixed(6)), details: details || undefined };
   }
 
   _setDecisionRecord(rec = {}) {
     this.lastDecisionRecord = { ts: Date.now(), ...rec };
+    if (typeof this.onDecisionRecord === "function") {
+      try { this.onDecisionRecord(this.lastDecisionRecord); } catch {}
+    }
   }
 
   _canOpenRiskEntry() {
@@ -562,20 +596,30 @@ export class LeadLagPaperStrategy {
       const followerVol = PaperBroker.rollingStd(followerR);
       if (!Number.isFinite(followerVol) || followerVol <= 0) return;
 
-      const tpR2 = this.tpSigma * followerVol;
-      const tpR1 = tpR2 * this.tp1Frac;
-      const slR = this.slSigma * followerVol;
       const brokerState = this.broker.getState();
-      const costsR = (2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0))) / 10_000;
-      const effectiveEdgeMult = Math.max(1, this.edgeMult - (0.5 * Math.max(0, Math.min(3, Number(this.riskLevel || 0)))));
-      const edgeGateR = costsR * effectiveEdgeMult * strictFactor;
-      if (tpR2 < edgeGateR) {
-        this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_EDGE", reason: "edgeGateFail", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, true), edge: this._gateMetric(tpR2, edgeGateR, false) });
-        this._countReject("edgeGateFail", "Edge gate блокирует вход…", edgeGateR - tpR2, {
-          edgeNow: tpR2,
-          edgeThr: edgeGateR,
+      const costsBps = 2 * ((Number(brokerState.feeBps) || 0) + (Number(brokerState.slippageBps) || 0));
+      const tpR2Adaptive = this.tpSigma * followerVol;
+      const slRAdaptive = this.slSigma * followerVol;
+      const tpBpsAdaptive = tpR2Adaptive * 10_000;
+      const slBpsAdaptive = slRAdaptive * 10_000;
+      const tpBpsMinEff = Math.max(this.tpBpsMin, costsBps + 2, 6);
+      const slBpsMinEff = Math.max(this.slBpsMin, 8);
+      const tpBps = Math.max(tpBpsAdaptive, tpBpsMinEff);
+      const slBps = Math.max(slBpsAdaptive, slBpsMinEff);
+      const tpR2 = tpBps / 10_000;
+      const tpR1 = (tpBps * this.tp1Frac) / 10_000;
+      const slR = slBps / 10_000;
+      const expMoveR = followerVol * Math.sqrt(Math.max(1, this.maxHoldBars));
+      const expMoveBps = expMoveR * 10_000;
+      const minEdgeBpsEff = this.minEdgeBps * Math.max(0.8, Math.min(1.2, Number(this.edgeSoftener || 1)));
+      const expEdgeBps = expMoveBps - costsBps;
+      if (expEdgeBps < minEdgeBpsEff) {
+        this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_EDGE", reason: "edgeGateFail", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, true), edge: this._gateMetric(expEdgeBps, minEdgeBpsEff, false, { expMoveBps, costsBps, expEdgeBps, minEdgeBps: minEdgeBpsEff, tpBps, slBps, tpBpsAdaptive, slBpsAdaptive }) });
+        this._countReject("edgeGateFail", "Edge gate блокирует вход…", minEdgeBpsEff - expEdgeBps, {
+          edgeNow: expEdgeBps,
+          edgeThr: minEdgeBpsEff,
         });
-        this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, tpR2, edgeGateR, costsR, edgeMult: this.edgeMult }, `gate:edge:${leader}:${follower}`);
+        this._logThrottled("paper_gate_skip", { reason: "edge_gate_fail", leader, follower, expMoveBps, costsBps, expEdgeBps, minEdgeBps: minEdgeBpsEff }, `gate:edge:${leader}:${follower}`);
         return;
       }
 
@@ -600,14 +644,21 @@ export class LeadLagPaperStrategy {
         tpR1,
         tpR2,
         slR,
-        edgeGateR,
+        expMoveBps,
+        costsBps,
+        expEdgeBps,
+        minEdgeBps: minEdgeBpsEff,
+        tpBps,
+        slBps,
+        tpBpsAdaptive,
+        slBpsAdaptive,
         expiresInBars: this.setupTTLbars,
         lastLeaderBarT: lastBar.t,
         lastFollowerBarT: null,
       };
       this.runtimeStatus = "Setup создан, жду подтверждение…";
-      this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_CONFIRM", reason: "confirm_pending", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, true), edge: this._gateMetric(tpR2, edgeGateR, true) });
-      this.logger?.log("paper_setup", { event: "setup_created", leader, follower, side, corr: top.corr, tpR1, tpR2, slR, edgeGateR, ttlBars: this.setupTTLbars, source: followerSource, symbol: follower, presetName: this.currentPresetName || null });
+      this._setDecisionRecord({ leader, follower, tradeGate: "WAIT_CONFIRM", reason: "confirm_pending", corr: this._gateMetric(Number(top.corr || 0), effMinCorr, true), impulse: this._gateMetric(impulseZNow, impulseZThr, true), edge: this._gateMetric(expEdgeBps, minEdgeBpsEff, true, { expMoveBps, costsBps, expEdgeBps, minEdgeBps: minEdgeBpsEff, tpBps, slBps, tpBpsAdaptive, slBpsAdaptive }) });
+      this.logger?.log("paper_setup", { event: "setup_created", leader, follower, side, corr: top.corr, tpR1, tpR2, slR, expMoveBps, costsBps, expEdgeBps, minEdgeBps: minEdgeBpsEff, ttlBars: this.setupTTLbars, source: followerSource, symbol: follower, presetName: this.currentPresetName || null });
       return;
     }
 
@@ -702,11 +753,18 @@ export class LeadLagPaperStrategy {
           leaderThr: setup.leaderThr,
           leaderVol: setup.leaderVol,
           followerVol: setup.followerVol,
-          edgeGateR: setup.edgeGateR,
+          expMoveBps: setup.expMoveBps,
+          costsBps: setup.costsBps,
+          expEdgeBps: setup.expEdgeBps,
+          minEdgeBps: setup.minEdgeBps,
+          tpBps: setup.tpBps,
+          slBps: setup.slBps,
           presetName: this.currentPresetName || null,
           isRiskEntry: riskCandidate,
           riskMode: this.riskMode,
           riskQtyMultiplier: qtyMultiplier,
+          initialQtyUSDT: qtyUSDT,
+          tp1Frac: this.tp1Frac,
         },
       });
 
@@ -730,7 +788,7 @@ export class LeadLagPaperStrategy {
       }
 
       this.runtimeStatus = "Сделка открыта";
-      this._setDecisionRecord({ leader: setup.leader, follower: setup.follower, tradeGate: "READY", reason: riskCandidate ? "risk_entry" : "entry", corr: this._gateMetric(setup.corr, effMinCorr, true), impulse: this._gateMetric(setup.impulseZNow, setup.impulseZThr, true), edge: this._gateMetric(setup.tpR2, setup.edgeGateR, true), confirm: this._gateMetric(Math.abs(Number(followerLastR || 0)), Math.abs(followerConfirmAbsMin), true, { samples: Number(top?.samples || 0), impulses: Number(top?.impulses || 0) }) });
+      this._setDecisionRecord({ leader: setup.leader, follower: setup.follower, tradeGate: "READY", reason: riskCandidate ? "risk_entry" : "entry", corr: this._gateMetric(setup.corr, effMinCorr, true), impulse: this._gateMetric(setup.impulseZNow, setup.impulseZThr, true), edge: this._gateMetric(setup.expEdgeBps, setup.minEdgeBps, true, { expMoveBps: setup.expMoveBps, costsBps: setup.costsBps, expEdgeBps: setup.expEdgeBps, minEdgeBps: setup.minEdgeBps, tpBps: setup.tpBps, slBps: setup.slBps, tpBpsAdaptive: setup.tpBpsAdaptive, slBpsAdaptive: setup.slBpsAdaptive }), confirm: this._gateMetric(Math.abs(Number(followerLastR || 0)), Math.abs(followerConfirmAbsMin), true, { samples: Number(top?.samples || 0), impulses: Number(top?.impulses || 0) }) });
       if (this.debugAllowEntryWithoutImpulse) this._lastDebugEntryAt = Date.now();
       this.logger?.log("paper_signal", {
         event: "opened_trade",

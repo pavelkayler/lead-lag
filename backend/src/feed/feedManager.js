@@ -3,7 +3,7 @@ import { RingBuffer } from "./ringBuffer.js";
 import { resolveBybitConfig } from "../exchange/bybitEnv.js";
 
 export class FeedManager {
-  constructor({ tickMs = 100, barMs = 250, maxBarSeconds = 120, broadcast, logger = null, wsUrl = null } = {}) {
+  constructor({ tickMs = 100, barMs = 1000, maxBarSeconds = 300, broadcast, logger = null, wsUrl = null } = {}) {
     this.tickMs = tickMs;
     this.barMs = barMs;
     this.maxBars = Math.max(1, Math.floor((maxBarSeconds * 1000) / barMs));
@@ -66,6 +66,8 @@ export class FeedManager {
     this._lastBnRawSample = null;
 
     this.tickLogSampleMs = Number(process.env.FEED_TICK_LOG_SAMPLE_MS) || 1000;
+    this.barLogSampleMs = Math.max(1000, Number(process.env.FEED_BAR_LOG_SAMPLE_MS) || 10_000);
+    this._lastBarLogBySeries = new Map();
     this.latWin = Math.max(100, Number(process.env.LATENCY_WINDOW) || 2000);
 
     this._barLatency = [];
@@ -776,7 +778,23 @@ export class FeedManager {
       }
 
       this.broadcast("bar", bar);
-      this.logger?.log("bar", { symbol: s, source, t: now, mid, r });
+      const barLogKey = `${s}|${source}`;
+      const lastBarLogAt = Number(this._lastBarLogBySeries.get(barLogKey) || 0);
+      if ((now - lastBarLogAt) >= this.barLogSampleMs) {
+        this._lastBarLogBySeries.set(barLogKey, now);
+        this.logger?.log("bar_sample", {
+          symbol: s,
+          source,
+          t: now,
+          lastMid: mid,
+          r,
+          ageMs: st.lastTickRecvTs ? (now - st.lastTickRecvTs) : null,
+          wsState: { bybitUp: this.isWsUp(), binanceUp: this.isBinanceWsUp() },
+          reconnects: { bybit: this.reconnects, binance: this.binanceReconnects },
+          barLatency: this._percentiles(this._barLatency),
+          wsDelay: this._percentiles(this._wsDelay),
+        });
+      }
       }
     }
   }

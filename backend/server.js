@@ -1147,7 +1147,7 @@ const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
   const tradeState = new TradeState({ logger });
 
   const feed = new FeedManager({
-    barMs: 250,
+    barMs: 1000,
     maxBarSeconds: 120,
     broadcast: (topic, payload) => hub.broadcast(topic, payload),
     logger,
@@ -1155,7 +1155,7 @@ const hub = new WsHub({ maxBuffered: MAX_BUFFERED_BYTES, logger });
   feed.setSymbols(DEFAULT_SYMBOLS);
   HTTP_CTX.feed = feed;
 
-  const leadLag = new LeadLagService({ feed, hub, logger: leadlagLogger, intervalMs: 2000, windowBars: 240, maxLagBars: 20, minBars: 120 });
+  const leadLag = new LeadLagService({ feed, hub, logger: leadlagLogger, intervalMs: 2000, windowBars: 120, maxLagBars: 12, minBars: 60 });
   leadLag.start();
 
   const priv = new PrivateWsClient({

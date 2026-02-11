@@ -13,11 +13,14 @@ const DEFAULT_PRESET = {
   qtyUSDT: 25,
   minCorr: 0.15,
   stdBars: 120,
+  stdSec: 120,
   impulseZ: 2.5,
   tpSigma: 1.5,
   slSigma: 1.0,
-  maxHoldBars: 20,
-  cooldownBars: 20,
+  maxHoldBars: 30,
+  maxHoldSec: 30,
+  cooldownBars: 30,
+  cooldownSec: 30,
   entryStrictness: 65,
   blacklistSymbols: [],
   blacklist: [],
@@ -44,7 +47,9 @@ const DEFAULT_PRESET = {
       minCorr: { floor: 0.05, ceil: 0.4 },
       impulseZ: { floor: 1.2, ceil: 4 },
       confirmZ: { floor: 0.05, ceil: 1 },
-      edgeMult: { floor: 1.5, ceil: 8 },
+      minEdgeBps: { floor: 2, ceil: 12 },
+      tpBpsMin: { floor: 6, ceil: 24 },
+      slBpsMin: { floor: 8, ceil: 30 },
       riskImpulseMargin: { floor: 0.1, ceil: 0.8 },
       riskQtyMultiplier: { floor: 0.2, ceil: 1.0 },
       riskModeMax: 3,
@@ -69,8 +74,8 @@ function normalizeBlacklist(preset = {}) {
 
 const DEFAULT_PRESETS = [
   DEFAULT_PRESET,
-  { name: "balanced", qtyUSDT: 20, minCorr: 0.2, stdBars: 160, impulseZ: 2.2, tpSigma: 1.4, slSigma: 1.0, maxHoldBars: 28, cooldownBars: 16, entryStrictness: 60 },
-  { name: "safe", qtyUSDT: 14, minCorr: 0.26, stdBars: 220, impulseZ: 2.4, tpSigma: 1.2, slSigma: 0.8, maxHoldBars: 32, cooldownBars: 28, entryStrictness: 78 },
+  { name: "balanced", qtyUSDT: 20, minCorr: 0.2, stdBars: 160, impulseZ: 2.2, tpSigma: 1.4, slSigma: 1.0, maxHoldBars: 40, cooldownBars: 24, minEdgeBps: 4, tpBpsMin: 8, slBpsMin: 12, entryStrictness: 60 },
+  { name: "safe", qtyUSDT: 14, minCorr: 0.26, stdBars: 220, impulseZ: 2.4, tpSigma: 1.2, slSigma: 0.8, maxHoldBars: 50, cooldownBars: 36, minEdgeBps: 6, tpBpsMin: 10, slBpsMin: 16, entryStrictness: 78 },
 ];
 
 export class PaperTestRunner {
@@ -104,6 +109,7 @@ export class PaperTestRunner {
     this.lastWaitMessage = "";
     this.logDedup = new Map();
     this.attemptCounter = 0;
+    this.lastExecTryAt = 0;
     this.nextTunePlan = "";
     fs.mkdirSync(this.resultsDir, { recursive: true });
     try {
@@ -140,7 +146,7 @@ export class PaperTestRunner {
     return {
       minCorr: Number(p.minCorr || 0),
       impulseZ: Number(p.impulseZ || 0),
-      edgeMult: Number(p.edgeMult || 0),
+      minEdgeBps: Number(p.minEdgeBps || 0),
       confirmZ: Number(p.minFollowerConfirmZ || 0),
       gatePassCountHour: p.gatePassCountHour || {},
       decisionRecord: p.decisionRecord || null,
@@ -308,6 +314,15 @@ export class PaperTestRunner {
     return `${String(level || "info").toUpperCase()}:${String(tag || "GEN").toUpperCase()}:${String(messageBase || "-").toUpperCase()}:${String(symbolKey || "-").toUpperCase()}:${String(reasonKey || "-").toUpperCase()}:${String(thresholdSnapshotRounded || "-")}`;
   }
 
+
+  _onDecisionRecord(decision = null) {
+    if (!decision || typeof decision !== "object") return;
+    const hasGateMetric = ["corr", "impulse", "edge", "confirm"].some((k) => decision?.[k] && typeof decision[k] === "object" && Number.isFinite(Number(decision[k].value)));
+    const candidateExists = !!(decision?.leader && decision?.follower);
+    if (!hasGateMetric || !candidateExists) return;
+    this.attemptCounter += 1;
+  }
+
   _emitWaitLog() {
     const now = Date.now();
     if ((now - this.lastWaitLogAt) < 10_000) return;
@@ -328,13 +343,24 @@ export class PaperTestRunner {
     const gatePass = this._activeStrategies()[0]?.getParams?.()?.gatePassCountHour || {};
     const neverPass = Object.entries(gatePass).filter(([,v]) => Number(v || 0) === 0).map(([k]) => k);
     const noTradeDiag = neverPass.length ? ` NO_TRADE: gates never pass -> ${neverPass.join(",")}.` : "";
-    const message = `WAIT: нет входа. top-3 причины: ${parts.join(", ") || "данные копятся"}. Пороги: minCorr=${Number(p.minCorr || 0).toFixed(3)}, impulseZ=${Number(p.impulseZ || 0).toFixed(2)}, edgeMult=${Number(p.edgeMult || 0).toFixed(2)}, confirmZ=${Number(p.confirmZ || 0).toFixed(2)}. ${explain.join("; ") || "distance-to-pass: n/a"}. Следующий шаг: ${this.nextTunePlan || "ожидание"}.${noTradeDiag} ${status}.`;
-    const dedupKey = this._dedupLogKey({ level: "info", tag: "WAIT", messageBase: parts.join("|"), reasonKey: parts[0] || "none", thresholdSnapshotRounded: `${Number(p.minCorr || 0).toFixed(3)}:${Number(p.impulseZ || 0).toFixed(2)}:${Number(p.edgeMult || 0).toFixed(2)}:${Number(p.confirmZ || 0).toFixed(2)}` });
-    if ((this.lastWaitMessage !== message && this._shouldLogOnce(dedupKey, 5000)) || (now - this.lastWaitLogAt) >= 10_000) {
+    const decision = p.decisionRecord || this._activeStrategies()[0]?.getParams?.()?.decisionRecord || null;
+    const gateRows = [["corr", decision?.corr], ["impulse", decision?.impulse], ["edge", decision?.edge], ["confirm", decision?.confirm]]
+      .filter(([, g]) => g && typeof g === "object" && g.pass === false)
+      .map(([name, g]) => ({ gate: name, value: Number(g.value || 0), thr: Number(g.thr || 0), margin: Number(g.margin || 0), pass: false }))
+      .sort((a, b) => a.margin - b.margin)
+      .slice(0, 3);
+    const waitFor = gateRows.length ? gateRows.map((g) => `${g.gate}: нужно ${g.value.toFixed(4)} >= ${g.thr.toFixed(4)}`).join("; ") : "нужны новые данные";
+    const message = `WHY_NO_ENTRY: top3=${JSON.stringify(gateRows)}; блокеры=${parts.join(", ") || "данные копятся"}; thresholds={minCorr:${Number(p.minCorr || 0).toFixed(3)},impulseZ:${Number(p.impulseZ || 0).toFixed(2)},minEdgeBps:${Number(p.minEdgeBps || 0).toFixed(2)},confirmZ:${Number(p.confirmZ || 0).toFixed(2)}}; waitFor=${waitFor}; next=${this.nextTunePlan || "ожидание"}.${noTradeDiag} ${status}.`;
+    const dedupKey = this._dedupLogKey({ level: "info", tag: "WHY_NO_ENTRY", messageBase: parts.join("|"), reasonKey: parts[0] || "none", thresholdSnapshotRounded: `${Number(p.minCorr || 0).toFixed(3)}:${Number(p.impulseZ || 0).toFixed(2)}:${Number(p.minEdgeBps || 0).toFixed(2)}:${Number(p.confirmZ || 0).toFixed(2)}` });
+    if ((this.lastWaitMessage !== message && this._shouldLogOnce(dedupKey, 25_000)) || (now - this.lastWaitLogAt) >= 10_000) {
       this.advisor.logEvent("wait", message);
       this.lastWaitMessage = message;
     }
     this.lastWaitLogAt = now;
+  }
+
+  _logAutoTuneChange(payload = {}) {
+    this.logger?.log("AUTO_TUNE_CHANGE", payload);
   }
 
   _randomInRange(floor, ceil, digits = 4) {
@@ -350,11 +376,15 @@ export class PaperTestRunner {
     const cfg = this.status?.autoTuneConfig || {};
     if (!cfg.enabled) return usePresets;
     const now = Date.now();
+    const startedAt = Number(this.status?.startedAt || now);
+    const startedAgoMs = Math.max(0, now - startedAt);
+    if (startedAgoMs < (Math.max(1, Number(cfg.startTuningAfterMin || 12)) * 60_000)) return usePresets;
     if ((now - this.lastSessionTuneAt) < (Number(cfg.tuningIntervalSec || 90) * 1000)) return usePresets;
 
     const summary = this._aggregateSummary();
     const targets = this.instances.size ? Array.from(this.instances.values()).map((x) => ({ strategy: x.strategy, preset: x.preset })) : [{ strategy: this.strategy, preset: this.status.currentPreset || usePresets[0] }];
     let changed = false;
+    let zeroPassPriority = [];
 
     const riskLevels = ["OFF", "LOW", "MED", "HIGH"];
     const riskRank = (mode) => Math.max(0, riskLevels.indexOf(String(mode || "OFF").toUpperCase()));
@@ -368,9 +398,18 @@ export class PaperTestRunner {
         for (const [k, v] of Object.entries(row.counters || {})) totals[k] = Number(totals[k] || 0) + Number(v || 0);
       }
       const blocksTotal = Object.values(totals).reduce((a, v) => a + Number(v || 0), 0);
+      const gatePass = this._activeStrategies()[0]?.getParams?.()?.gatePassCountHour || {};
+      zeroPassPriority = [
+        Number(gatePass.corrPassCount || 0) === 0 ? "corrFail" : null,
+        Number(gatePass.impulsePassCount || 0) === 0 ? "impulseFail" : null,
+        Number(gatePass.edgePassCount || 0) === 0 ? "edgeGateFail" : null,
+        Number(gatePass.confirmPassCount || 0) === 0 ? "confirmFail" : null,
+      ].filter(Boolean);
       if (blocksTotal > 0) {
-        const impulseShare = Number(totals.impulseFail || 0) / blocksTotal;
-        const edgeShare = Number(totals.edgeGateFail || 0) / blocksTotal;
+        let impulseShare = Number(totals.impulseFail || 0) / blocksTotal;
+        let edgeShare = Number(totals.edgeGateFail || 0) / blocksTotal;
+        if (zeroPassPriority[0] === "impulseFail") impulseShare = 1;
+        if (zeroPassPriority[0] === "edgeGateFail") edgeShare = 1;
 
         for (const t of targets) {
           if (changed) break;
@@ -389,6 +428,7 @@ export class PaperTestRunner {
               t.preset = { ...preset, impulseZ: Number(to.toFixed(4)) };
               this.nextTunePlan = `понизить impulseZ ещё на ${step}`;
               this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLOIT] preset=${preset.name} param impulseZ ${from.toFixed(2)}->${to.toFixed(2)} reason=impulseFail ${(impulseShare * 100).toFixed(0)}% window=${Math.round(this.rejectWindowMs/1000)}s`);
+              this._logAutoTuneChange({ param: "impulseZ", from, to, reason: "exploit", blockerGate: zeroPassPriority[0] || "impulseFail", marginSnapshot: { impulseShare, totals }, bounds: cfg?.bounds?.impulseZ || null });
               changed = true;
               break;
             }
@@ -419,15 +459,16 @@ export class PaperTestRunner {
           }
 
           if (!changed && edgeShare > 0.4) {
-            const floor = Number(cfg?.bounds?.edgeMult?.floor ?? 2.5);
-            const step = Number(cfg?.stepEdgeMult ?? 0.5);
-            const from = Number(params.edgeMult || 5);
+            const floor = Number(cfg?.bounds?.minEdgeBps?.floor ?? 2.5);
+            const step = Number(cfg?.stepMinEdgeBps ?? 0.5);
+            const from = Number(params.minEdgeBps || 6);
             const to = Math.max(floor, from - step);
             if (to < from) {
-              strategy.setParams({ edgeMult: Number(to.toFixed(4)) });
-              t.preset = { ...preset, edgeMult: Number(to.toFixed(4)) };
-              this.nextTunePlan = `понизить edgeMult ещё на ${step}`;
-              this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLOIT] preset=${preset.name} param edgeMult ${from.toFixed(2)}->${to.toFixed(2)} reason=edgeGateFail ${(edgeShare * 100).toFixed(0)}% window=${Math.round(this.rejectWindowMs/1000)}s`);
+              strategy.setParams({ minEdgeBps: Number(to.toFixed(4)) });
+              t.preset = { ...preset, minEdgeBps: Number(to.toFixed(4)) };
+              this.nextTunePlan = `понизить minEdgeBps ещё на ${step}`;
+              this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLOIT] preset=${preset.name} param minEdgeBps ${from.toFixed(2)}->${to.toFixed(2)} reason=edgeGateFail ${(edgeShare * 100).toFixed(0)}% window=${Math.round(this.rejectWindowMs/1000)}s`);
+              this._logAutoTuneChange({ param: "minEdgeBps", from, to, reason: "exploit", blockerGate: zeroPassPriority[0] || "edgeGateFail", marginSnapshot: { edgeShare, totals }, bounds: cfg?.bounds?.minEdgeBps || null });
               changed = true;
               break;
             }
@@ -484,12 +525,13 @@ export class PaperTestRunner {
             impulseZ: this._randomInRange(cfg?.bounds?.impulseZ?.floor ?? 1.2, cfg?.bounds?.impulseZ?.ceil ?? 4, 3),
             minCorr: this._randomInRange(cfg?.bounds?.minCorr?.floor ?? 0.05, cfg?.bounds?.minCorr?.ceil ?? 0.4, 3),
             minFollowerConfirmZ: this._randomInRange(cfg?.bounds?.confirmZ?.floor ?? 0.05, cfg?.bounds?.confirmZ?.ceil ?? 1, 3),
-            edgeMult: this._randomInRange(cfg?.bounds?.edgeMult?.floor ?? 1.5, cfg?.bounds?.edgeMult?.ceil ?? 8, 3),
+            minEdgeBps: this._randomInRange(cfg?.bounds?.minEdgeBps?.floor ?? 2, cfg?.bounds?.minEdgeBps?.ceil ?? 12, 3),
           };
           strategy.setParams(sample);
           t.preset = { ...preset, ...sample, confirmZ: sample.minFollowerConfirmZ };
           this.nextTunePlan = "случайная bounded-попытка (explore)";
-          this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLORE] attempts=${this.attemptCounter} random sample impulseZ=${sample.impulseZ}, confirmZ=${sample.minFollowerConfirmZ}, edgeMult=${sample.edgeMult}, minCorr=${sample.minCorr}`);
+          this.advisor.logEvent("auto-tune", `[AUTO-TUNE][EXPLORE] attempts=${this.attemptCounter} random sample impulseZ=${sample.impulseZ}, confirmZ=${sample.minFollowerConfirmZ}, minEdgeBps=${sample.minEdgeBps}, minCorr=${sample.minCorr}`);
+          this._logAutoTuneChange({ param: "random-single", from: null, to: sample, reason: "explore", blockerGate: zeroPassPriority?.[0] || "mixed", marginSnapshot: null, bounds: cfg?.bounds || null });
           changed = true;
           break;
         }
@@ -571,6 +613,7 @@ export class PaperTestRunner {
     this.stopRequested = false;
     this.instances.clear();
     this.sessionWorkingPreset.clear();
+    this.attemptCounter = 0;
 
     const runId = `paper-${Date.now()}`;
     const startedAt = Date.now();
@@ -623,6 +666,7 @@ export class PaperTestRunner {
         const strategy = new LeadLagPaperStrategy({ feed: this.feed, leadLag: this.leadLag, broker, hub: this.hub, logger: this.logger });
         strategy.setParams({ ...preset, enabled: true, name: preset.name, allowedSources, fixedLeaders: preset?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
         strategy.onAutoExclude = (ev) => this._handleAutoExclude(ev);
+        strategy.onDecisionRecord = (rec) => this._onDecisionRecord(rec);
         strategy.enable(true);
         strategy.start();
         this.instances.set(preset.name, { broker, strategy, preset });
@@ -631,6 +675,7 @@ export class PaperTestRunner {
       this.instances.clear();
       this.strategy.setParams({ ...usePresets[0], enabled: true, name: usePresets[0].name, allowedSources, fixedLeaders: usePresets[0]?.useFixedLeaders ? ["BTCUSDT","ETHUSDT","SOLUSDT"] : null, debugAllowEntryWithoutImpulse, debugEntryCooldownMin });
       this.strategy.onAutoExclude = (ev) => this._handleAutoExclude(ev);
+      this.strategy.onDecisionRecord = (rec) => this._onDecisionRecord(rec);
       this.strategy.enable(true);
     }
 
@@ -642,7 +687,7 @@ export class PaperTestRunner {
       tuningIntervalSec: Number(presetTune?.tuningIntervalSec || 90),
       targetMinTradesPerHour: Number(presetTune?.targetMinTradesPerHour || 1),
       stepImpulseZ: Number(presetTune?.stepImpulseZ || 0.2),
-      stepEdgeMult: Number(presetTune?.stepEdgeMult || 0.5),
+      stepMinEdgeBps: Number(presetTune?.stepMinEdgeBps || 0.5),
       stepRiskImpulseMargin: Number(presetTune?.stepRiskImpulseMargin || 0.1),
       bounds: presetTune?.bounds || {},
     };
@@ -746,8 +791,6 @@ export class PaperTestRunner {
           this.status.learning = this.advisor.getLearningPayload();
           this._updatePresetStats();
           this.status.topPairs = this._buildTopPairs();
-          const decision = this._activeStrategies()[0]?.getParams?.()?.decisionRecord || null;
-          if (decision && decision.tradeGate !== "WAIT_NO_CANDIDATE") this.attemptCounter += 1;
           this.status.state = this._deriveRuntimeState();
           this._writeLatest("Running");
           this._broadcast();

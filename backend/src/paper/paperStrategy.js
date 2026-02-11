@@ -29,6 +29,7 @@ export class LeadLagPaperStrategy {
     this.fixedLeaders = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
     this.useFixedLeaders = false;
     this.allowedSources = new Set(["BT", "BNB"]);
+    this.interExchangeArbEnabled = true;
     this.blacklistSymbols = new Set();
     this.blacklistBySource = new Map();
     this.noMatchAsLeaderCount = new Map();
@@ -87,6 +88,7 @@ export class LeadLagPaperStrategy {
     if (Array.isArray(p.fixedLeaders)) { this.fixedLeaders = p.fixedLeaders.map((x) => String(x).toUpperCase()); this.useFixedLeaders = true; }
     if (p.useFixedLeaders != null) this.useFixedLeaders = !!p.useFixedLeaders;
     if (Array.isArray(p.allowedSources)) this.allowedSources = new Set(p.allowedSources.map((x) => String(x).toUpperCase()));
+    if (p.interExchangeArbEnabled != null) this.interExchangeArbEnabled = !!p.interExchangeArbEnabled;
     if (p.autoExcludeNoMatchThreshold != null) this.autoExcludeNoMatchThreshold = Math.max(10, Math.round(n(p.autoExcludeNoMatchThreshold, this.autoExcludeNoMatchThreshold)));
     if (p.debugAllowEntryWithoutImpulse != null) this.debugAllowEntryWithoutImpulse = !!p.debugAllowEntryWithoutImpulse;
     if (p.debugEntryCooldownMin != null) this.debugEntryCooldownMin = Math.max(1, Math.round(n(p.debugEntryCooldownMin, this.debugEntryCooldownMin)));
@@ -138,6 +140,7 @@ export class LeadLagPaperStrategy {
       fixedLeaders: this.fixedLeaders,
       useFixedLeaders: this.useFixedLeaders,
       allowedSources: Array.from(this.allowedSources),
+      interExchangeArbEnabled: this.interExchangeArbEnabled,
       blacklistSymbols: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])),
       blacklist: Array.from(new Set([...this.blacklistSymbols, ...Array.from(this.blacklistBySource.keys())])).map((symbol) => ({ symbol, sources: this.blacklistBySource.get(symbol) || [] })),
       autoExcludeNoMatchThreshold: this.autoExcludeNoMatchThreshold,
@@ -377,6 +380,13 @@ export class LeadLagPaperStrategy {
 
     const pairs = (this.leadLag.latest?.pairs || []).slice(0, 20);
     this._updateNoMatchCounters(pairs);
+
+    if (this.interExchangeArbEnabled && (!this.allowedSources.has("BT") || !this.allowedSources.has("BNB"))) {
+      this._countReject("noCandidatePairs", "interExchangeArbEnabled: нужны обе биржи (BT+BNB), пары не сформированы");
+      this._logThrottled("paper_status", { event: "inter_exchange_requires_both", allowedSources: Array.from(this.allowedSources), presetName: this.currentPresetName || null }, "inter_exchange_requires_both", 8000);
+      return;
+    }
+
     const top = pairs.find((p) => {
       const leaderBase = this._symbolBase(p.leaderBase || p.leader);
       const followerBase = this._symbolBase(p.followerBase || p.follower);
@@ -384,6 +394,10 @@ export class LeadLagPaperStrategy {
       const followerSource = String(p.followerSource || "BT").toUpperCase();
       if (!this.allowedSources.has(leaderSource) || !this.allowedSources.has(followerSource)) return false;
       if (this.useFixedLeaders && !this.fixedLeaders.includes(String(leaderBase || "").toUpperCase())) return false;
+      if (this.interExchangeArbEnabled) {
+        if (!leaderBase || !followerBase || leaderBase !== followerBase) return false;
+        if (leaderSource === followerSource) return false;
+      }
       return !this._isSeriesBlacklisted(followerBase, followerSource);
     });
     const topLeader = this._symbolBase(top?.leaderBase || top?.leader);
@@ -417,7 +431,8 @@ export class LeadLagPaperStrategy {
     }
     const leader = this._symbolBase(top.leaderBase || top.leader);
     const follower = this._symbolBase(top.followerBase || top.follower);
-    const followerSource = String(top.followerSource || "BT").toUpperCase();
+    const followerSourceRaw = String(top.followerSource || "BT").toUpperCase();
+    const followerSource = this.interExchangeArbEnabled ? "BT" : followerSourceRaw;
 
     const strictFactor = this._strictFactor();
     const effMinCorr = this.minCorr * strictFactor;

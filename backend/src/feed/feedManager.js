@@ -31,6 +31,8 @@ export class FeedManager {
     this.bars = new Map();  // key(symbol|source) -> RingBuffer
 
     this._barTimer = null;
+    this._syntheticTimer = null;
+    this._syntheticStates = new Map();
 
     this._ws = null;
     this._bnWs = null;
@@ -202,6 +204,8 @@ export class FeedManager {
     }
     this._barTimer = setInterval(() => this._onBar(), this.barMs);
     this._barTimer.unref?.();
+    this._syntheticTimer = setInterval(() => this._tickSynthetic(), Math.max(120, this.tickMs));
+    this._syntheticTimer.unref?.();
 
     this.logger?.log("feed_start", { barMs: this.barMs, maxBars: this.maxBars });
   }
@@ -217,10 +221,55 @@ export class FeedManager {
 
     clearInterval(this._barTimer);
     this._barTimer = null;
+    clearInterval(this._syntheticTimer);
+    this._syntheticTimer = null;
 
     this._cleanupWs(true);
     this._cleanupBinanceWs();
     this.logger?.log("feed_stop", {});
+  }
+
+  _tickSynthetic() {
+    const symbol = "TESTUSDT";
+    if (!this.symbols.includes(symbol)) return;
+    const now = Date.now();
+    const baseRegimes = [
+      { name: "low", sigma: 0.0016, mean: 95, amp: 0.018 },
+      { name: "mid", sigma: 0.0045, mean: 120, amp: 0.032 },
+      { name: "high", sigma: 0.009, mean: 160, amp: 0.06 },
+    ];
+    const init = this._syntheticStates.get(symbol) || {
+      px: 100,
+      drift: 100,
+      regimeIdx: 0,
+      regimeChangedAt: now,
+      nextSwitchMs: 10_000,
+      phase: 0,
+      lastTs: now,
+    };
+
+    let st = { ...init };
+    if ((now - st.regimeChangedAt) >= st.nextSwitchMs) {
+      st.regimeIdx = (st.regimeIdx + 1) % baseRegimes.length;
+      st.regimeChangedAt = now;
+      st.nextSwitchMs = 8_000 + Math.round(Math.random() * 8_000);
+      this.logger?.log("synthetic_regime", { symbol, regime: baseRegimes[st.regimeIdx].name, nextSwitchMs: st.nextSwitchMs });
+    }
+    const regime = baseRegimes[st.regimeIdx];
+    const dt = Math.max(0.05, (now - Number(st.lastTs || now)) / 1000);
+    st.lastTs = now;
+
+    const kappa = 0.55;
+    const noise = regime.sigma * (Math.random() - 0.5) * 2;
+    st.phase += dt * (0.8 + st.regimeIdx * 0.7);
+    const oscillation = regime.amp * Math.sin(st.phase);
+    const meanPull = kappa * (st.drift - st.px) * dt / Math.max(1, regime.mean);
+    const dPct = meanPull + noise + oscillation * 0.22;
+    st.px = Math.max(0.5, st.px * (1 + dPct));
+
+    this.ingestMid(symbol, Number(st.px.toFixed(6)), now, now, { source: "BT" });
+    this.ingestMid(symbol, Number((st.px * (1 + (Math.random() - 0.5) * 0.0008)).toFixed(6)), now, now, { source: "BNB" });
+    this._syntheticStates.set(symbol, st);
   }
 
   getBars(symbol, n, source = "BT") {

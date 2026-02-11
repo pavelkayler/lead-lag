@@ -3,18 +3,36 @@ import { getLastClosedBar } from "./levels.js";
 const TF_TO_BYBIT = { "5m": "5", "15m": "15", "1h": "60" };
 
 export class CycleTracker {
-  constructor({ rest, executor, logger = null }) {
+  constructor({ rest, feed = null, executor, logger = null }) {
     this.rest = rest;
+    this.feed = feed;
     this.executor = executor;
     this.logger = logger;
   }
 
-  async getMark(symbol) {
+  async getMark(symbol, mode = "real") {
+    if (String(mode).toLowerCase() === "paper" && this.feed) {
+      const m = this.feed.getMid(symbol, "BT") ?? this.feed.getMid(symbol, "BNB");
+      if (Number.isFinite(m)) return Number(m);
+    }
     const t = await this.rest.publicGet("/v5/market/tickers", { category: "linear", symbol });
     return Number(t?.result?.list?.[0]?.markPrice || t?.result?.list?.[0]?.lastPrice || NaN);
   }
 
-  async getLastClosedTfBar(symbol, timeframe = "15m") {
+  async getLastClosedTfBar(symbol, timeframe = "15m", mode = "real") {
+    if (String(mode).toLowerCase() === "paper" && this.feed) {
+      const bars = this.feed.getBars(symbol, 3, "BT");
+      const bar = bars[bars.length - 2] || bars[bars.length - 1];
+      if (bar) {
+        return {
+          ts: Number(bar.t || bar.ts),
+          open: Number(bar.open),
+          high: Number(bar.high),
+          low: Number(bar.low),
+          close: Number(bar.close),
+        };
+      }
+    }
     const interval = TF_TO_BYBIT[timeframe] || "15";
     try {
       const resp = await this.rest.publicGet("/v5/market/kline", { category: "linear", symbol, interval, limit: 3 });
@@ -100,8 +118,8 @@ export class CycleTracker {
   }
 
   async evaluate({ config, cycle, levels }) {
-    const mark = await this.getMark(config.symbol);
-    if (!Number.isFinite(mark)) return { action: null };
+    const mark = await this.getMark(config.symbol, config.mode);
+    if (!Number.isFinite(mark)) return { action: null, reason: "no_mark" };
 
     const fills = (cycle.openOrders || []).filter((o) => !o.filledAt && this._isEntryHit(cycle.side, mark, Number(o.entryPrice || 0)));
     for (const fill of fills) fill.filledAt = Date.now();
@@ -113,23 +131,24 @@ export class CycleTracker {
       return { action: "position_opened", mark };
     }
 
-    if (!cycle.position) return { action: null };
+    if (!cycle.position) return { action: null, reason: "waiting_fill" };
 
     const p = cycle.position;
     const { tpPrice, slPrice } = this._calcTpSl(p, config);
     p.tpPrice = Number(tpPrice.toFixed(8));
     p.slPrice = Number(slPrice.toFixed(8));
     const pnlPct = p.side === "LONG" ? ((mark / p.avgEntry) - 1) * 100 : ((p.avgEntry / mark) - 1) * 100;
+    const pnlUSDT = Number(p.qty || 0) * (p.side === "LONG" ? (mark - p.avgEntry) : (p.avgEntry - mark));
     const tpHit = p.side === "LONG" ? mark >= p.tpPrice : mark <= p.tpPrice;
     const slHit = p.side === "LONG" ? mark <= p.slPrice : mark >= p.slPrice;
-    if (tpHit) return { action: "close", reason: "TP", mark, pnlPct };
-    if (slHit) return { action: "close", reason: "SL", mark, pnlPct };
+    if (tpHit) return { action: "close", reason: "TP", mark, pnlPct, pnlUSDT };
+    if (slHit) return { action: "close", reason: "SL", mark, pnlPct, pnlUSDT };
 
-    if (!config.enableNearTpEarlyExit) return { action: null };
+    if (!config.enableNearTpEarlyExit) return { action: null, reason: "early_exit_disabled" };
 
     const near = this._calcNearTp(p, config, mark);
-    if (!near.inZone) return { action: null };
-    if (pnlPct < Number(config.minTakeRoiPct || 0)) return { action: null };
+    if (!near.inZone) return { action: null, reason: "not_in_near_tp_zone" };
+    if (pnlPct < Number(config.minTakeRoiPct || 0)) return { action: null, reason: "min_roi_not_reached" };
 
     if (!cycle.nearTpState) cycle.nearTpState = { enteredAt: Date.now(), peakPrice: mark };
     const peak = Number(cycle.nearTpState.peakPrice || mark);
@@ -143,9 +162,9 @@ export class CycleTracker {
         ? mark <= peakPrice * (1 - pullbackPct / 100)
         : mark >= peakPrice * (1 + pullbackPct / 100);
     }
-    if (!pullbackOk) return { action: null };
+    if (!pullbackOk) return { action: null, reason: "pullback_not_confirmed" };
 
-    const bar = (await this.getLastClosedTfBar(config.symbol, config.timeframe)) || getLastClosedBar(levels);
+    const bar = (await this.getLastClosedTfBar(config.symbol, config.timeframe, config.mode)) || getLastClosedBar(levels);
     const candle = this._calcCandleStrength(p, bar);
     let candleOk = true;
     if (config.reverseCandleRequired) {
@@ -154,13 +173,14 @@ export class CycleTracker {
         && candle.bodyPct >= Number(config.minReverseBodyPct || 0)
         && candle.bodyToRange >= Number(config.minBodyToRangeRatio || 0);
     }
-    if (!candleOk) return { action: null };
+    if (!candleOk) return { action: null, reason: "reverse_candle_not_confirmed" };
 
     return {
       action: "close",
       reason: "EARLY",
       mark,
       pnlPct,
+      pnlUSDT,
       earlyMeta: {
         tpPrice: Number(near.tpPrice.toFixed(8)),
         nearStartPrice: Number(near.nearStartPrice.toFixed(8)),
